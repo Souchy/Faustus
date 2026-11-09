@@ -1,0 +1,31 @@
+[package]
+name = "market-ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "faustus-desktop"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = "=0.9.1"
+market-core = { path = "../market-core" }
+serde.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Location", "Window"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio.workspace = true
+
+[lints]
+workspace = true

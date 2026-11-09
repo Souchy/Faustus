@@ -1,0 +1,23 @@
+[package]
+name = "market-store"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes.workspace = true
+chrono.workspace = true
+faustus-fetch = { path = "../faustus-fetch" }
+market-core = { path = "../market-core" }
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20"
+tokio.workspace = true
+
+[lints]
+workspace = true
