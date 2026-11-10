@@ -15,7 +15,8 @@ export function gemOverview(): GemMarketOverview {
   return {
     league: 'Standard', fetched_at: '2026-11-09T12:00:00Z',
     gems: [gem(1, 0, false, '2'), gem(20, 0, false, '40'), gem(20, 20, false, '100'),
-      gem(21, 20, true, '140'), gem(20, 23, true, '120')],
+      gem(21, 20, true, '140'), gem(20, 23, true, '120'),
+      gem(20, 20, true, '80'), gem(20, 0, true, '40')],
   };
 }
 

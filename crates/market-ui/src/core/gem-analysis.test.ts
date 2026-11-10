@@ -25,7 +25,7 @@ describe('same-instant gem analysis', () => {
   it('carries one category through every strategy and uses metadata from any variant', () => {
     const overview = categorizedGemOverview();
     const expected = ['Transfigured', 'Exceptional', 'Skill', 'Support', 'Trarthus'];
-    for (const strategy of ['level', 'quality', 'corrupt-level', 'corrupt-quality'] as const) {
+    for (const strategy of ['level', 'quality', 'corrupt'] as const) {
       expect(opportunities(overview.gems, strategy, inputs()).map((row) => row.gemType)).toEqual(expected);
     }
     const gems = [
@@ -57,7 +57,7 @@ describe('same-instant gem analysis', () => {
     expect(filterAndSort(rows, '', false, 'gemType', false)[0]?.gemType).toBe('Trarthus');
   });
 
-  it('matches all four strategies and subtracts material costs', () => {
+  it('matches all three strategies and subtracts material costs', () => {
     const gems = gemOverview().gems;
     expect(opportunities(gems, 'level', inputs())[0]?.profit).toBe(38);
     const lens = opportunities(gems, 'level', { ...inputs(), lensPrice: 5, useLens: true })[0];
@@ -66,8 +66,44 @@ describe('same-instant gem analysis', () => {
     const quality = opportunities(gems, 'quality', inputs())[0];
     expect(quality?.materialCost).toBe(20);
     expect(quality?.profit).toBe(40);
-    expect(opportunities(gems, 'corrupt-level', inputs())[0]?.profit).toBe(38);
-    expect(opportunities(gems, 'corrupt-quality', inputs())[0]?.profit).toBe(18);
+    const corruption = opportunities(gems, 'corrupt', inputs())[0];
+    expect(corruption).toMatchObject({ targetPrice: 87.5, maxValue: 140, materialCost: 2, profit: -14.5 });
+    expect(corruption?.roiPercent).toBeCloseTo(-14.5 / 102 * 100);
+    expect(corruption?.corruptionOutcomes?.map((outcome) => outcome.probability)).toEqual([0.125, 0.125, 0.625, 0.125]);
+    expect(corruption?.corruptionOutcomes?.reduce((sum, outcome) => sum + outcome.probability, 0)).toBe(1);
+    expect(corruption?.corruptionOutcomes?.map((outcome) => outcome.contribution)).toEqual([17.5, 15, 50, 5]);
+    const expensiveQuality = gems.map((gem) => gem.corrupted && gem.gem_quality === 23
+      ? { ...gem, chaos_value: '200' } : gem);
+    expect(opportunities(expensiveQuality, 'corrupt', inputs())[0]?.maxValue).toBe(200);
+  });
+
+  it('uses the lowest priced fallback within a bucket and never substitutes uncorrupted prices', () => {
+    const gems = gemOverview().gems.filter((gem) => gem.gem_quality !== 23);
+    gems.push(gem(20, 21, true, '110'), gem(20, 22, true, '90'), gem(20, 19, true, '30'));
+    const row = opportunities(gems, 'corrupt', inputs())[0];
+    expect(row?.corruptionOutcomes?.[1]).toMatchObject({ price: 90, estimated: true, variant: 'Lv20 Q22 corrupted' });
+    expect(row?.corruptionOutcomes?.[3]).toMatchObject({ price: 30, estimated: true });
+    expect(row?.targetPrice).toBe(82.5);
+    for (const missingQuality of [0, 20, 23]) {
+      const incomplete = gemOverview().gems.filter((gem) => !gem.corrupted || gem.gem_quality !== missingQuality);
+      expect(opportunities(incomplete, 'corrupt', inputs())).toEqual([]);
+    }
+    expect(opportunities(gemOverview().gems.filter((gem) => gem.gem_level !== 21), 'corrupt', inputs())).toEqual([]);
+  });
+
+  it('prefers the requested outcome price and checks confidence on all valued outcomes', () => {
+    const gems = [...gemOverview().gems, gem(20, 21, true, '1'), gem(19, 20, true, '1')];
+    expect(opportunities(gems, 'corrupt', inputs())[0]?.targetPrice).toBe(87.5);
+    for (const quality of [0, 20, 23]) {
+      const low = gems.map((gem) => gem.corrupted && gem.gem_quality === quality && gem.gem_level === 20
+        ? { ...gem, sample_count: 4, listing_count: 3 } : gem);
+      expect(opportunities(low, 'corrupt', inputs())[0]).toMatchObject({ lowConfidence: true, targetListings: 3 });
+    }
+    for (const value of ['invalid', '-1', 'Infinity']) {
+      const invalid = gemOverview().gems.map((gem) => gem.corrupted && gem.gem_quality === 20 && gem.gem_level === 20
+        ? { ...gem, chaos_value: value } : gem);
+      expect(opportunities(invalid, 'corrupt', inputs())).toEqual([]);
+    }
   });
 
   it('uses the selected snapshot prices, not different sparkline endpoints', () => {
@@ -98,7 +134,7 @@ describe('same-instant gem analysis', () => {
   it('requires material prices and valid lens input only for the relevant strategies', () => {
     const gems = gemOverview().gems;
     expect(opportunities(gems, 'quality', { ...inputs(), gcpPrice: null })).toEqual([]);
-    expect(opportunities(gems, 'corrupt-level', { ...inputs(), vaalPrice: null })).toEqual([]);
+    expect(opportunities(gems, 'corrupt', { ...inputs(), vaalPrice: null })).toEqual([]);
     for (const lensPrice of [null, -1, 0, Infinity, NaN]) {
       expect(opportunities(gems, 'level', { ...inputs(), lensPrice, useLens: true })).toEqual([]);
     }
@@ -140,10 +176,12 @@ describe('same-instant gem analysis', () => {
   it('sorts text, numeric and combined listing columns in both directions', () => {
     const row = opportunities(gemOverview().gems, 'level', inputs())[0];
     if (!row) throw new Error('Expected fixture opportunity');
-    const rows = [{ ...row, name: 'Fireball', sourceListings: 1, targetListings: 2 },
-      { ...row, name: 'Arc', sourceListings: 8, targetListings: 12 }];
+    const rows = [{ ...row, name: 'Fireball', sourceListings: 1, targetListings: 2, maxValue: 200 },
+      { ...row, name: 'Arc', sourceListings: 8, targetListings: 12, maxValue: 140 }];
     expect(filterAndSort(rows, '', true, 'name', true)[0]?.name).toBe('Arc');
     expect(filterAndSort(rows, '', true, 'name', false)[0]?.name).toBe('Fireball');
     expect(filterAndSort(rows, '', true, 'listings', false)[0]?.name).toBe('Arc');
+    expect(filterAndSort(rows, '', true, 'maxValue', false)[0]?.name).toBe('Fireball');
+    expect(filterAndSort(rows, '', true, 'maxValue', true)[0]?.name).toBe('Arc');
   });
 });

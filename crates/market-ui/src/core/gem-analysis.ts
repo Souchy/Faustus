@@ -1,8 +1,8 @@
 import type { CurrentExchangePriceOverview, GemMarketLine } from './api-types';
 
-export type GemStrategy = 'level' | 'quality' | 'corrupt-level' | 'corrupt-quality';
+export type GemStrategy = 'level' | 'quality' | 'corrupt';
 export type GemSortColumn = 'name' | 'gemType' | 'sourceVariant' | 'sourcePrice' | 'targetVariant'
-  | 'targetPrice' | 'materialCost' | 'profit' | 'roiPercent' | 'listings';
+  | 'targetPrice' | 'maxValue' | 'materialCost' | 'profit' | 'roiPercent' | 'listings';
 export type GemType = 'Skill' | 'Support' | 'Exceptional' | 'Transfigured' | 'Trarthus' | 'Unknown';
 export const gemTypes: GemType[] = ['Skill', 'Support', 'Exceptional', 'Transfigured', 'Trarthus', 'Unknown'];
 
@@ -20,8 +20,7 @@ export function gemType(name: string, kind: string | null | undefined): GemType 
 export const strategies: { id: GemStrategy; label: string; description: string }[] = [
   { id: 'level', label: 'Level flip', description: 'Buy level 1, sell the highest uncorrupted level. Leveling time excluded; Lens is optional.' },
   { id: 'quality', label: 'Add quality', description: "Compare max-level 0% and 20% quality; cost includes 20 Gemcutter's Prisms." },
-  { id: 'corrupt-level', label: 'Vaal +1 level', description: 'Compare max-level 20% to corrupted +1 level. Profit is conditional on that outcome.' },
-  { id: 'corrupt-quality', label: 'Vaal +3 quality', description: 'Compare max-level 20% to corrupted +3% quality. Profit is conditional on that outcome.' },
+  { id: 'corrupt', label: 'Vaal corrupt', description: 'Approximate expected returns across four corruption outcome buckets.' },
 ];
 
 export function decimal(value: string | null | undefined): number | null {
@@ -57,12 +56,23 @@ export interface GemOpportunity {
   targetVariant: string;
   sourcePrice: number;
   targetPrice: number;
+  maxValue: number;
   materialCost: number;
   profit: number;
   roiPercent: number;
   sourceListings: number;
   targetListings: number;
   lowConfidence: boolean;
+  corruptionOutcomes?: CorruptionOutcome[];
+}
+
+export interface CorruptionOutcome {
+  label: string;
+  probability: number;
+  price: number;
+  contribution: number;
+  variant: string;
+  estimated: boolean;
 }
 
 function variantLabel(gem: GemMarketLine): string {
@@ -79,7 +89,7 @@ export function opportunities(
   if (strategy === 'level' && inputs.useLens
     && (inputs.lensPrice === null || !Number.isFinite(inputs.lensPrice) || inputs.lensPrice <= 0)) return [];
   if (strategy === 'quality' && inputs.gcpPrice === null) return [];
-  if (strategy.startsWith('corrupt-') && inputs.vaalPrice === null) return [];
+  if (strategy === 'corrupt' && inputs.vaalPrice === null) return [];
 
   const groups = new Map<string, GemMarketLine[]>();
   for (const gem of gems) {
@@ -99,6 +109,8 @@ export function opportunities(
     let source: GemMarketLine | undefined;
     let target: GemMarketLine | undefined;
     let materialCost = 0;
+    let corruptionOutcomes: CorruptionOutcome[] | undefined;
+    let outcomeVariants: GemMarketLine[] = [];
     if (strategy === 'level') {
       const level = maxLevel(0);
       if (level <= 1) continue;
@@ -113,23 +125,53 @@ export function opportunities(
     } else {
       const level = maxLevel(20);
       source = find(level, 20, false);
-      target = strategy === 'corrupt-level' ? find(Math.min(255, level + 1), 20, true)
-        : find(level, 23, true);
       materialCost = inputs.vaalPrice ?? 0;
+      const buckets = [
+        { label: '+1 level', probability: 0.125, level: level + 1, qualities: [20], preferred: 20 },
+        { label: '+3 quality', probability: 0.125, level, qualities: [21, 22, 23], preferred: 23 },
+        { label: 'Max level corrupted (including releveled -1)', probability: 0.625, level, qualities: [20], preferred: 20 },
+        { label: 'Max level Q0-19 corrupted', probability: 0.125, level,
+          qualities: Array.from({ length: 20 }, (_, quality) => quality), preferred: null },
+      ];
+      corruptionOutcomes = [];
+      for (const bucket of buckets) {
+        const candidates = variants.filter((gem) => gem.corrupted && gem.gem_level === bucket.level
+          && bucket.qualities.includes(gem.gem_quality ?? 0) && listedPrice(gem.chaos_value) !== null);
+        const preferred = candidates.find((gem) => gem.gem_quality === bucket.preferred);
+        const selected = preferred ?? candidates.sort((a, b) => Number(a.chaos_value) - Number(b.chaos_value))[0];
+        if (!selected) break;
+        const price = listedPrice(selected.chaos_value);
+        if (price === null) break;
+        outcomeVariants.push(selected);
+        corruptionOutcomes.push({
+          label: bucket.label, probability: bucket.probability, price,
+          contribution: bucket.probability * price, variant: variantLabel(selected),
+          estimated: !preferred,
+        });
+      }
+      if (corruptionOutcomes.length !== buckets.length) continue;
+      target = outcomeVariants[0];
     }
     if (!source || !target) continue;
     const sourcePrice = listedPrice(source.chaos_value);
-    const targetPrice = listedPrice(target.chaos_value);
+    const targetPrice = corruptionOutcomes
+      ? corruptionOutcomes.reduce((sum, outcome) => sum + outcome.contribution, 0)
+      : listedPrice(target.chaos_value);
     if (sourcePrice === null || targetPrice === null) continue;
     const totalCost = sourcePrice + materialCost;
     if (totalCost <= 0) continue;
     rows.push({
       name, gemType: gemType(name, variants.find((gem) => gem.gem_kind)?.gem_kind),
-      sourceVariant: variantLabel(source), targetVariant: variantLabel(target),
+      sourceVariant: variantLabel(source), targetVariant: corruptionOutcomes ? 'Expected resale (approx.)' : variantLabel(target),
       sourcePrice, targetPrice, materialCost, profit: targetPrice - totalCost,
+      maxValue: corruptionOutcomes ? Math.max(...corruptionOutcomes.map((outcome) => outcome.price)) : targetPrice,
       roiPercent: (targetPrice / totalCost - 1) * 100,
-      sourceListings: source.listing_count ?? 0, targetListings: target.listing_count ?? 0,
-      lowConfidence: lowConfidence(source, inputs.confidenceThreshold) || lowConfidence(target, inputs.confidenceThreshold),
+      sourceListings: source.listing_count ?? 0,
+      targetListings: corruptionOutcomes
+        ? Math.min(...outcomeVariants.map((gem) => gem.listing_count ?? 0)) : target.listing_count ?? 0,
+      lowConfidence: lowConfidence(source, inputs.confidenceThreshold)
+        || (corruptionOutcomes ? outcomeVariants : [target]).some((gem) => lowConfidence(gem, inputs.confidenceThreshold)),
+      corruptionOutcomes,
     });
   }
   return rows;

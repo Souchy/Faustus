@@ -35,6 +35,70 @@ function mockService(options: { priceFailure?: boolean; selected?: string | null
 }
 
 describe('dashboard state', () => {
+  it('uses editable material prices for the relevant strategies and restores automatic snapshot prices', async () => {
+    mockService();
+    const app = createApp();
+    await app.loadDashboard();
+    expect(app.gcpPrice).toBe(1);
+    expect(app.vaalPrice).toBe(2);
+    app.setStrategy('quality');
+    app.setMaterialPrice('gcp', '1.5');
+    expect(app.rows[0]).toMatchObject({ materialCost: 30, profit: 30 });
+    app.setMaterialPrice('vaal', '3.25');
+    app.setStrategy('corrupt');
+    expect(app.rows[0]?.profit).toBe(-15.75);
+    const row = app.rows[0];
+    if (!row) throw new Error('Expected corruption opportunity');
+    expect(app.corruptionBreakdown(row)).toContain('12.5% x 140.00c = 17.50c');
+    expect(app.corruptionBreakdown(row)).toContain('Expected Net = 87.50c - 103.25c = -15.75c');
+    expect(app.corruptionBreakdown(row)).toContain('estimated: lowest listed price in bucket');
+    app.setStrategy('level');
+    expect(app.rows[0]?.profit).toBe(38);
+    await app.selectGemSnapshot('1');
+    expect(app.gcpPrice).toBe(1.5);
+    expect(app.vaalPrice).toBe(3.25);
+    await app.loadDashboard();
+    expect(app.gcpPrice).toBe(1.5);
+    app.setMaterialPrice('gcp', '');
+    app.setMaterialPrice('vaal', '');
+    expect(app.gcpPrice).toBe(0.5);
+    expect(app.vaalPrice).toBe(0.5);
+    expect(app.materialPlaceholder(app.gemPrices, 'gcp')).toBe('0.5');
+    app.setMaterialPrice('gcp', '10');
+    app.setMaterialPrice('vaal', '10');
+    await app.loadDashboard('Other');
+    expect(app.gcpPriceText).toBe('');
+    expect(app.vaalPriceText).toBe('');
+    expect(app.gcpPrice).toBe(1);
+    expect(app.prices?.lines[0]?.primary_value).toBe('1');
+  });
+
+  it('validates manual prices without falling back and allows zero or explicit prices when the feed fails', async () => {
+    mockService({ priceFailure: true });
+    const app = createApp();
+    await app.loadDashboard();
+    expect(app.materialPlaceholder(app.gemPrices, 'gcp')).toBe('Chaos');
+    for (const material of ['gcp', 'vaal'] as const) {
+      app.setMaterialPrice('gcp', '');
+      app.setMaterialPrice('vaal', '');
+      app.setStrategy(material === 'gcp' ? 'quality' : 'corrupt');
+      app.setMaterialPrice(material, '0');
+      expect(app.rows).toHaveLength(1);
+      expect(app.rows[0]?.materialCost).toBe(0);
+      for (const value of ['-1', 'NaN', 'Infinity', 'invalid']) {
+        app.setMaterialPrice(material, value);
+        expect(app.rows).toEqual([]);
+        expect(app.materialPriceError).toContain('non-negative');
+      }
+      app.setMaterialPrice(material, '2');
+      expect(app.materialPriceError).toBe('');
+      expect(app.rows).toHaveLength(1);
+      expect(app.gemPriceError).toContain('HTTP 502');
+      app.setMaterialPrice(material, '');
+      expect(app.rows).toEqual([]);
+    }
+  });
+
   it('uses the API instance registered with Aurelia DI', async () => {
     const api = new MarketApi('');
     const leagues = vi.spyOn(api, 'leagues').mockResolvedValue([]);
@@ -141,7 +205,7 @@ describe('dashboard state', () => {
     await app.loadDashboard();
     expect(app.error).toBe('');
     expect(app.priceError).toContain('HTTP 502');
-    expect(app.gems?.gems).toHaveLength(5);
+    expect(app.gems?.gems).toHaveLength(gemOverview().gems.length);
     expect(app.rows).toHaveLength(1);
     app.setStrategy('quality');
     expect(app.rows).toHaveLength(0);

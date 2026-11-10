@@ -48,18 +48,24 @@ export class MarketApp {
   confidenceThresholdText = '10';
   useLens = false;
   lensPriceText = '50';
+  gcpPriceText = '';
+  vaalPriceText = '';
   sortColumn: GemSortColumn = 'profit';
   sortAscending = false;
   rowLimit = 50;
   rows: GemOpportunity[] = [];
   tableScroll: HTMLElement | null = null;
-  readonly columns: { id: GemSortColumn; label: string }[] = [
-    { id: 'name', label: 'Gem' }, { id: 'gemType', label: 'Type' },
-    { id: 'sourcePrice', label: 'Buy' },
-    { id: 'targetPrice', label: 'Sell' },
-    { id: 'profit', label: 'Net' }, { id: 'roiPercent', label: 'ROI' },
-    { id: 'listings', label: 'Listings' },
-  ];
+  get columns(): { id: GemSortColumn; label: string }[] {
+    const columns: { id: GemSortColumn; label: string }[] = [
+      { id: 'name', label: 'Gem' }, { id: 'gemType', label: 'Type' },
+      { id: 'sourcePrice', label: 'Buy' },
+      { id: 'targetPrice', label: 'Sell' },
+      { id: 'profit', label: 'Net' }, { id: 'roiPercent', label: 'ROI' },
+    ];
+    if (this.strategy === 'corrupt') columns.push({ id: 'maxValue', label: 'Max value' });
+    columns.push({ id: 'listings', label: 'Listings' });
+    return columns;
+  }
 
   attached(): void {
     void this.loadDashboard();
@@ -95,11 +101,24 @@ export class MarketApp {
   }
 
   get gcpPrice(): number | null {
-    return exchangePrice(this.gemPrices, 'gcp');
+    return this.gcpPriceText.trim() === '' ? exchangePrice(this.gemPrices, 'gcp') : this.manualMaterialPrice(this.gcpPriceText);
   }
 
   get vaalPrice(): number | null {
-    return exchangePrice(this.gemPrices, 'vaal');
+    return this.vaalPriceText.trim() === '' ? exchangePrice(this.gemPrices, 'vaal') : this.manualMaterialPrice(this.vaalPriceText);
+  }
+
+  get materialPriceError(): string {
+    const invalid = [
+      this.gcpPriceText.trim() !== '' && this.gcpPrice === null ? 'GCP' : '',
+      this.vaalPriceText.trim() !== '' && this.vaalPrice === null ? 'Vaal' : '',
+    ].filter(Boolean);
+    return invalid.length ? `${invalid.join(' and ')}: enter a non-negative Chaos price, or clear the field to use the feed price.` : '';
+  }
+
+  private manualMaterialPrice(text: string): number | null {
+    const price = decimal(text);
+    return price !== null && price >= 0 ? price : null;
   }
 
   get confidenceThreshold(): number | null {
@@ -115,12 +134,17 @@ export class MarketApp {
     if (this.gemError) return this.gemError;
     if (this.loading || this.gemLoading) return `Loading gem variants for ${this.selectedLeagueName}.`;
     if (this.confidenceError) return this.confidenceError;
+    if ((this.strategy === 'quality' && this.gcpPrice === null)
+      || (this.strategy === 'corrupt' && this.vaalPrice === null)) {
+      if (this.materialPriceError) return this.materialPriceError;
+    }
     if (this.selectedGemTypes !== 'all' && !this.selectedGemTypes.length) return 'Select at least one gem type to show opportunities.';
     if (this.strategy === 'level' && this.useLens && (decimal(this.lensPriceText) ?? 0) <= 0) {
       return "Set a positive Facetor's Lens unit price to calculate this strategy.";
     }
     if (this.strategy === 'quality' && this.gcpPrice === null) return "Gemcutter's Prism prices are unavailable for this instant.";
-    if (this.strategy.startsWith('corrupt-') && this.vaalPrice === null) return 'Vaal Orb prices are unavailable for this instant.';
+    if (this.strategy === 'corrupt' && this.vaalPrice === null) return 'Vaal Orb prices are unavailable for this instant.';
+    if (this.strategy === 'corrupt') return 'No matching gems with sufficient confidence and a listed price in every corruption bucket were found.';
     return 'No matching variants with sufficient confidence and listed prices were found for this strategy.';
   }
 
@@ -156,6 +180,7 @@ export class MarketApp {
       if (this.gemLeagueId !== this.selectedLeagueId) {
         this.selectedGemSnapshot = 'latest';
         this.gemSnapshots = [];
+        this.gcpPriceText = this.vaalPriceText = '';
       }
       this.gemLeagueId = this.selectedLeagueId;
       if (status.selected_league !== this.selectedLeagueId) {
@@ -251,6 +276,17 @@ export class MarketApp {
     this.updateRows();
   }
 
+  setMaterialPrice(material: 'gcp' | 'vaal', price: string): void {
+    if (material === 'gcp') this.gcpPriceText = price;
+    else this.vaalPriceText = price;
+    this.updateRows();
+  }
+
+  materialPlaceholder(overview: CurrentExchangePriceOverview | null, material: 'gcp' | 'vaal'): string {
+    const price = exchangePrice(overview, material);
+    return price === null ? 'Chaos' : String(price);
+  }
+
   toggleLens(): void {
     this.useLens = !this.useLens;
     this.updateRows();
@@ -329,6 +365,24 @@ export class MarketApp {
 
   money(value: number | null): string {
     return value === null ? 'not available' : `${value.toFixed(2)}c`;
+  }
+
+  corruptionBreakdown(row: GemOpportunity): string {
+    if (!row.corruptionOutcomes) return '';
+    const totalCost = row.sourcePrice + row.materialCost;
+    return [
+      'Approximate four-bucket Vaal model',
+      '21-22% quality grouped with +3 quality; Vaal conversion treated as unchanged.',
+      'The -1 level outcome is releveled to max; leveling time excluded.',
+      ...row.corruptionOutcomes.map((outcome) =>
+        `${(outcome.probability * 100).toFixed(1)}% x ${this.money(outcome.price)} = ${this.money(outcome.contribution)}: ${outcome.label}`
+        + ` (${outcome.variant}${outcome.estimated ? '; estimated: lowest listed price in bucket' : ''})`),
+      `EV (expected value) = ${this.money(row.targetPrice)}`,
+      `Cost = ${this.money(row.sourcePrice)} buy + ${this.money(row.materialCost)} Vaal = ${this.money(totalCost)}`,
+      `Expected Net = ${this.money(row.targetPrice)} - ${this.money(totalCost)} = ${this.money(row.profit)}`,
+      `Expected ROI = ${this.money(row.profit)} / ${this.money(totalCost)} x 100 = ${row.roiPercent.toFixed(1)}%`,
+      'Listings: buy / minimum across valued outcomes.',
+    ].join('\n');
   }
 
   timestamp(value: string | undefined): string {

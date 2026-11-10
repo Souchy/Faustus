@@ -35,7 +35,7 @@ p { margin: 0; }
 .toolbar, .lens-controls, .confidence-controls, .search-controls, .strategy-list { display: flex; align-items: center; gap: 8px; }
 .toolbar { justify-content: space-between; flex-wrap: wrap; }
 .lens-controls { flex-wrap: wrap; }
-.lens-price { width: 70px; }
+.lens-price, .material-price { width: 70px; }
 .confidence-controls { flex-shrink: 0; }
 .confidence-controls label { gap: 4px; }
 .confidence-controls .confidence-threshold { width: 48px; padding: 7px 6px; }
@@ -59,6 +59,36 @@ tbody tr:hover { background: #161616; }
 .gem-name:hover { text-decoration: underline; background: none; }
 .confidence { display: inline-block; font-size: 10px; margin-left: 8px; color: #e6b96b; }
 .positive { color: #91d5b3; }
+.weighted-return { display: inline-block; cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+.weighted-return:focus-visible { outline: 2px solid #bdbdbd; outline-offset: 3px; }
+.return-breakdown {
+  display: none;
+  position: fixed;
+  z-index: 4;
+  bottom: 20px;
+  right: 20px;
+  width: min(800px, calc(100vw - 40px));
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid #484848;
+  border-radius: 4px;
+  background: #161616;
+  color: #e6e6e6;
+  box-shadow: 0 8px 24px #0008;
+  white-space: normal;
+  text-decoration: none;
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+  cursor: text;
+}
+.weighted-return:is(:hover, :focus-within) .return-breakdown { display: block; }
+.return-breakdown table { table-layout: fixed; }
+.return-breakdown th, .return-breakdown td { position: static; padding: 6px; white-space: normal; overflow-wrap: anywhere; }
+.return-breakdown th { font-size: inherit; text-transform: none; }
+.return-breakdown small { display: block; color: #e6b96b; }
+.return-breakdown p { margin-top: 10px; color: #aaaaaa; }
 .negative, .error { color: #e28c82; }
 .banner { padding: 12px; margin-top: 12px; border: 1px solid #854c47; background: #161616; border-radius: 4px; }
 .empty { padding: 40px 20px; text-align: center; color: #aaaaaa; white-space: normal; }

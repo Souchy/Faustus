@@ -7,7 +7,18 @@
         aria-pressed.bind="strategy === item.id" click.trigger="setStrategy(item.id)">${item.label}</button>
     </div>
     <div class="lens-controls">
-      <span class="muted">GCP ${money(gcpPrice)} | Vaal ${money(vaalPrice)}</span>
+      <label title="GCP price in Chaos. Clear to use the selected instant's feed price.">GCP
+        <input aria-label="GCP price in Chaos" class="material-price" type="text" inputmode="decimal"
+          placeholder.bind="materialPlaceholder(gemPrices, 'gcp')" value.bind="gcpPriceText"
+          aria-invalid.bind="gcpPriceText.trim() && gcpPrice === null ? 'true' : 'false'" aria-describedby="material-price-help"
+          input.trigger="setMaterialPrice('gcp', $event.target.value)">
+      </label>
+      <label title="Vaal Orb price in Chaos. Clear to use the selected instant's feed price.">Vaal
+        <input aria-label="Vaal price in Chaos" class="material-price" type="text" inputmode="decimal"
+          placeholder.bind="materialPlaceholder(gemPrices, 'vaal')" value.bind="vaalPriceText"
+          aria-invalid.bind="vaalPriceText.trim() && vaalPrice === null ? 'true' : 'false'" aria-describedby="material-price-help"
+          input.trigger="setMaterialPrice('vaal', $event.target.value)">
+      </label>
       <label><input type="checkbox" checked.to-view="useLens" change.trigger="toggleLens()"> Lens</label>
       <input aria-label="Facetor's Lens unit price in Chaos" class="lens-price" type="text" inputmode="decimal"
         placeholder="Chaos" value.bind="lensPriceText" input.trigger="setLensPrice($event.target.value)">
@@ -50,12 +61,14 @@
     </div>
   </div>
   <p if.bind="confidenceError" id="confidence-help" class="error" role="alert">${confidenceError}</p>
+  <p if.bind="materialPriceError" id="material-price-help" class="error" role="alert">${materialPriceError}</p>
   <p if.bind="gemPriceError" class="error" role="alert">${gemPriceError}</p>
+  <p if.bind="strategy === 'corrupt'" class="muted">EV = expected value. Approximate returns; hover or focus EV / Net / ROI for the weighted breakdown.</p>
   <div class="table-scroll gem-table" ref="tableScroll">
     <table>
       <thead><tr>
         <th repeat.for="column of columns" aria-sort.bind="sortColumn === column.id ? (sortAscending ? 'ascending' : 'descending') : 'none'">
-          <button click.trigger="sort(column.id)">${column.label}${sortColumn === column.id ? (sortAscending ? ' ^' : ' v') : ''}</button>
+          <button click.trigger="sort(column.id)">${strategy === 'corrupt' && column.id === 'targetPrice' ? 'EV' : column.label}${sortColumn === column.id ? (sortAscending ? ' ^' : ' v') : ''}</button>
         </th>
       </tr></thead>
       <tbody>
@@ -63,9 +76,35 @@
           <td><button class="gem-name" click.trigger="setSearch(row.name)">${row.name}</button><span if.bind="row.lowConfidence" class="confidence">LOW CONF</span></td>
           <td>${row.gemType}</td>
           <td>${money(row.sourcePrice)}</td>
-          <td>${money(row.targetPrice)}</td>
-          <td class.bind="row.profit >= 0 ? 'positive' : 'negative'">${money(row.profit)}</td>
-          <td>${row.roiPercent.toFixed(1)}%</td><td>${row.sourceListings}/${row.targetListings}</td>
+          <td repeat.for="metric of ['targetPrice', 'profit', 'roiPercent']"
+            class.bind="metric === 'profit' ? (row.profit >= 0 ? 'positive' : 'negative') : ''">
+            <div tabindex.bind="row.corruptionOutcomes ? 0 : null" class.bind="row.corruptionOutcomes ? 'weighted-return' : ''"
+              aria-label.bind="row.corruptionOutcomes ? corruptionBreakdown(row) : null">
+              <span class="metric-value">${metric === 'roiPercent' ? row.roiPercent.toFixed(1) + '%' : money(row[metric])}</span>
+              <div if.bind="row.corruptionOutcomes" class="return-breakdown" role="tooltip">
+                <table aria-label="Expected value breakdown">
+                  <thead><tr><th>Outcome</th><th>Valued variant</th><th>Chance</th><th>Resale</th><th>Chance x resale</th></tr></thead>
+                  <tbody>
+                    <tr repeat.for="outcome of row.corruptionOutcomes">
+                      <td>${outcome.label}</td>
+                      <td>${outcome.variant}<small if.bind="outcome.estimated">Estimate: lowest listed in bucket</small></td>
+                      <td>${(outcome.probability * 100).toFixed(1)}%</td>
+                      <td>${money(outcome.price)}</td><td>${money(outcome.contribution)}</td>
+                    </tr>
+                  </tbody>
+                  <tfoot>
+                    <tr><th colspan="2">EV (sum)</th><td>100.0%</td><td></td><td>${money(row.targetPrice)}</td></tr>
+                    <tr><th colspan="2">Cost (buy + Vaal)</th><td colspan="2">${money(row.sourcePrice)} + ${money(row.materialCost)}</td><td>${money(row.sourcePrice + row.materialCost)}</td></tr>
+                    <tr><th colspan="2">Net (EV - cost)</th><td colspan="2">${money(row.targetPrice)} - ${money(row.sourcePrice + row.materialCost)}</td><td>${money(row.profit)}</td></tr>
+                    <tr><th colspan="2">ROI (Net / cost)</th><td colspan="2">${money(row.profit)} / ${money(row.sourcePrice + row.materialCost)} x 100</td><td>${row.roiPercent.toFixed(1)}%</td></tr>
+                  </tfoot>
+                </table>
+                <p>Approximate four-bucket model: 21-22% quality grouped with +3 quality; Vaal conversion treated as unchanged. -1 level is releveled to max; leveling time excluded.</p>
+              </div>
+            </div>
+          </td>
+          <td if.bind="strategy === 'corrupt'" title="Highest resale value among the modeled outcomes">${money(row.maxValue)}</td>
+          <td title.bind="row.corruptionOutcomes ? 'Buy / minimum listings across valued outcomes' : 'Buy / sell listings'">${row.sourceListings}/${row.targetListings}</td>
         </tr>
       </tbody>
     </table>

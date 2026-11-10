@@ -86,15 +86,59 @@ test('web UI works without Tauri: prices, all gem strategies, search, Lens and h
   await expect(page.locator('td.positive')).toHaveText('33.00c');
   await page.getByRole('button', { name: 'Add quality', exact: true }).click();
   await expect(page.locator('td.positive')).toHaveText('40.00c');
-  await page.getByRole('button', { name: 'Vaal +1 level', exact: true }).click();
-  await expect(page.locator('td.positive')).toHaveText('38.00c');
-  await page.getByRole('button', { name: 'Vaal +3 quality', exact: true }).click();
-  await expect(page.locator('td.positive')).toHaveText('18.00c');
+  await page.getByRole('button', { name: 'Vaal corrupt', exact: true }).click();
+  await expect(page.getByRole('button', { name: /Vaal \+/ })).toHaveCount(0);
+  await expect(page.locator('td.negative > .weighted-return > .metric-value')).toHaveText('-14.50c');
+  await expect(page.locator('.gem-table > table > thead th')).toHaveText(['Gem', 'Type', 'Buy', 'EV', 'Net v', 'ROI', 'Max value', 'Listings']);
+  await expect(page.locator('.gem-table > table > tbody > tr > td').nth(6)).toHaveText('140.00c');
+  const ev = page.locator('.weighted-return').nth(0);
+  const net = page.locator('td.negative .weighted-return');
+  const roi = page.locator('.weighted-return').nth(2);
+  for (const metric of [ev, net, roi]) {
+    const tooltip = metric.getByRole('tooltip');
+    await expect(tooltip).toBeHidden();
+    await metric.hover();
+    await expect(tooltip).toBeVisible();
+    const table = tooltip.getByRole('table', { name: 'Expected value breakdown' });
+    await expect(table.locator('thead th')).toHaveText(['Outcome', 'Valued variant', 'Chance', 'Resale', 'Chance x resale']);
+    await expect(table.locator('tbody tr')).toHaveCount(4);
+    await expect(table.locator('tbody tr').nth(0).locator('td')).toHaveText([
+      '+1 level', 'Lv21 Q20 corrupted', '12.5%', '140.00c', '17.50c',
+    ]);
+    await expect(table.locator('tbody tr').nth(2).locator('td')).toHaveText([
+      'Max level corrupted (including releveled -1)', 'Lv20 Q20 corrupted', '62.5%', '80.00c', '50.00c',
+    ]);
+    await expect(table.locator('tbody tr').nth(3)).toContainText('Estimate: lowest listed in bucket');
+    await expect(table.locator('tfoot tr').nth(0).locator('td')).toHaveText(['100.0%', '', '87.50c']);
+    await expect(table.locator('tfoot tr').nth(2).locator('td')).toHaveText(['87.50c - 102.00c', '-14.50c']);
+    await expect(table.locator('tfoot tr').nth(3).locator('td')).toHaveText(['-14.50c / 102.00c x 100', '-14.2%']);
+    await metric.focus();
+    await page.mouse.move(0, 0);
+    await expect(tooltip).toBeVisible();
+    await metric.blur();
+    await expect(tooltip).toBeHidden();
+  }
+  await page.getByRole('button', { name: 'EV', exact: true }).click();
+  await expect(page.getByRole('columnheader', { name: 'EV v', exact: true })).toHaveAttribute('aria-sort', 'descending');
+  await page.getByRole('button', { name: 'EV v', exact: true }).click();
+  await expect(page.getByRole('columnheader', { name: 'EV ^', exact: true })).toHaveAttribute('aria-sort', 'ascending');
+  await page.setViewportSize({ width: 390, height: 800 });
+  await ev.focus();
+  const tooltipBounds = await ev.getByRole('tooltip').boundingBox();
+  if (!tooltipBounds) throw new Error('Expected visible EV table');
+  expect(tooltipBounds.x).toBeGreaterThanOrEqual(0);
+  expect(tooltipBounds.x + tooltipBounds.width).toBeLessThanOrEqual(390);
+  await ev.blur();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.getByRole('button', { name: 'Max value', exact: true }).click();
+  await expect(page.getByRole('columnheader', { name: 'Max value v', exact: true })).toHaveAttribute('aria-sort', 'descending');
   await page.getByRole('searchbox', { name: 'Search gems' }).fill('unmatched');
   await expect(page.getByRole('button', { name: 'Fireball', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Clear gem search' }).click();
   await page.getByRole('button', { name: 'Fireball', exact: true }).click();
   await page.getByRole('button', { name: 'Level flip', exact: true }).click();
+  await expect(page.getByRole('columnheader', { name: /^Sell/ })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: /Max value/ })).toHaveCount(0);
   await expect(page.getByRole('searchbox', { name: 'Search gems' })).toHaveValue('Fireball');
   await page.getByRole('button', { name: 'GGG history', exact: true }).click();
   await expect(page.getByRole('cell', { name: 'chaos / divine', exact: true })).toBeVisible();
@@ -149,6 +193,38 @@ test('renders partial provider errors and disconnected-service errors', async ({
   await page.route('**/api/v1/**', (route) => route.abort('connectionrefused'));
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('external market service');
+});
+
+test('editable material prices update profits, validate input, and reset to snapshot prices', async ({ page }) => {
+  await service(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Gem flipping', exact: true }).click();
+  const gcp = page.getByRole('textbox', { name: 'GCP price in Chaos', exact: true });
+  const vaal = page.getByRole('textbox', { name: 'Vaal price in Chaos', exact: true });
+  await expect(gcp).toHaveAttribute('placeholder', '1');
+  await expect(vaal).toHaveAttribute('placeholder', '2');
+  await page.getByRole('button', { name: 'Add quality', exact: true }).click();
+  await gcp.fill('1.5');
+  await expect(page.locator('td.positive')).toHaveText('30.00c');
+  await gcp.fill('-1');
+  await expect(gcp).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.getByRole('alert')).toContainText('non-negative');
+  await expect(page.locator('.gem-table tbody tr')).toHaveCount(0);
+  await gcp.fill('0');
+  await expect(page.locator('td.positive')).toHaveText('60.00c');
+  await vaal.fill('3');
+  await page.getByRole('button', { name: 'Vaal corrupt', exact: true }).click();
+  await expect(page.locator('td.negative > .weighted-return > .metric-value')).toHaveText('-15.50c');
+  await page.getByRole('combobox', { name: 'Gem price instant' }).selectOption('1');
+  await expect(vaal).toHaveValue('3');
+  await expect(page.locator('td.negative > .weighted-return > .metric-value')).toHaveText('-9.25c');
+  await expect(page.getByRole('button', { name: 'Use automatic material prices', exact: true })).toHaveCount(0);
+  await gcp.fill('');
+  await vaal.fill('');
+  await expect(vaal).toHaveValue('');
+  await expect(vaal).toHaveAttribute('placeholder', '0.5');
+  await expect(page.locator('td.negative > .weighted-return > .metric-value')).toHaveText('-6.75c');
+  await expect(page.getByRole('button', { name: 'Use automatic material prices', exact: true })).toHaveCount(0);
 });
 
 test('confidence threshold updates filtering, badges and validation', async ({ page }) => {
@@ -210,7 +286,7 @@ test('selects saved instants newest first, retains selection on refresh and keep
   await expect(page.locator('td.positive')).toHaveText('20.00c');
   await expect(page.locator('.gem-table tbody tr').first().locator('td').nth(2)).toHaveText('20.00c');
   await expect(page.locator('.gem-table tbody tr').first().locator('td').nth(3)).toHaveText('50.00c');
-  await expect(page.locator('.lens-controls .muted')).toContainText('GCP 0.50c');
+  await expect(page.getByRole('textbox', { name: 'GCP price in Chaos', exact: true })).toHaveAttribute('placeholder', '0.5');
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
   await expect(instant).toHaveValue('1');
