@@ -7,20 +7,22 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     routing::get,
 };
 use chrono::Utc;
 use faustus_fetch::{FaustusClient, FetchError as FaustusFetchError};
 use market_core::{
     CurrentExchangePriceLine, CurrentExchangePriceOverview, ExchangeMarketSnapshot,
-    ExchangePriceCurrency, GemMarketLine, GemMarketOverview, LeagueOption, ServiceStatus,
+    ExchangePriceCurrency, GemAnalysisData, GemAnalysisOverview, GemMarketLine, GemMarketOverview,
+    LeagueOption, ServiceStatus,
 };
 use market_store::{NinjaSnapshot, SqliteStore, StoreError};
 use ninja_fetch::{CurrencyCategory, FetchError as NinjaFetchError, FetchOutcome, NinjaClient};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::{RwLock, watch};
+use tower_http::cors::CorsLayer;
 
 const LEAGUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const EXCHANGE_PRICE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -103,9 +105,17 @@ pub fn router(state: ServiceState) -> Router {
         .route("/api/v1/selection", axum::routing::post(select_league))
         .route("/api/v1/exchange/prices", get(exchange_prices))
         .route("/api/v1/gems", get(gem_overview))
+        .route("/api/v1/gem-analysis", get(gem_analysis))
         .route("/api/v1/status", get(status))
         .route("/api/v1/exchange/markets", get(exchange_markets))
         .with_state(state)
+}
+
+pub fn cors_layer(origins: Vec<HeaderValue>) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([CONTENT_TYPE])
 }
 
 pub async fn ingest_once(
@@ -560,6 +570,102 @@ async fn gem_overview(
     Ok(Json(overview))
 }
 
+#[derive(Debug, Deserialize)]
+struct GemAnalysisQuery {
+    league: String,
+    snapshot: Option<i64>,
+}
+
+async fn gem_analysis(
+    State(state): State<ServiceState>,
+    Query(query): Query<GemAnalysisQuery>,
+) -> Result<Json<GemAnalysisOverview>, StatusCode> {
+    let (snapshot, data) = if let Some(id) = query.snapshot {
+        if id <= 0 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let (snapshot, data) = state
+            .store
+            .gem_analysis_snapshot(&query.league, id)
+            .await
+            .map_err(|error| {
+                eprintln!("Failed to read gem snapshot: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        (Some(snapshot), data)
+    } else {
+        let (gems, prices) = tokio::join!(
+            gem_overview(
+                State(state.clone()),
+                Query(GemOverviewQuery {
+                    league: query.league.clone()
+                }),
+            ),
+            exchange_prices(
+                State(state.clone()),
+                Query(ExchangePricesQuery {
+                    league: query.league.clone(),
+                    category: "Currency".to_owned(),
+                }),
+            ),
+        );
+        let (gems, gem_error) = match gems {
+            Ok(Json(gems)) => (Some(gems), None),
+            Err(error) => (
+                None,
+                Some(format!("Gem prices returned HTTP {}", error.as_u16())),
+            ),
+        };
+        let (prices, price_error) = match prices {
+            Ok(Json(prices)) => (Some(prices), None),
+            Err(error) => (
+                None,
+                Some(format!("Material prices returned HTTP {}", error.as_u16())),
+            ),
+        };
+        let data = GemAnalysisData {
+            gems,
+            gem_error,
+            prices,
+            price_error,
+        };
+        let snapshot = if data.gems.is_some() {
+            Some(
+                state
+                    .store
+                    .record_gem_analysis_snapshot(&query.league, &data, Utc::now())
+                    .await
+                    .map_err(|error| {
+                        eprintln!("Failed to record gem snapshot: {error}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
+            )
+        } else {
+            None
+        };
+        (snapshot, data)
+    };
+    let mut snapshots = state
+        .store
+        .gem_analysis_snapshots(&query.league)
+        .await
+        .map_err(|error| {
+            eprintln!("Failed to list gem snapshots: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if let Some(selected) = &snapshot
+        && !snapshots.iter().any(|entry| entry.id == selected.id)
+    {
+        snapshots.push(selected.clone());
+    }
+    Ok(Json(GemAnalysisOverview {
+        snapshot,
+        data,
+        snapshots,
+    }))
+}
+
 fn gem_market_overview(league: &str, overview: ninja_fetch::ItemOverview) -> GemMarketOverview {
     GemMarketOverview {
         league: league.to_owned(),
@@ -569,6 +675,7 @@ fn gem_market_overview(league: &str, overview: ninja_fetch::ItemOverview) -> Gem
             .into_iter()
             .map(|line| GemMarketLine {
                 name: line.name,
+                gem_kind: line.metadata.and_then(|metadata| metadata.gem_kind),
                 variant: line.variant,
                 gem_level: line.gem_level,
                 gem_quality: line.gem_quality,
@@ -679,6 +786,343 @@ mod tests {
 
     use super::*;
 
+    async fn cached_analysis_state() -> (tempfile::TempDir, ServiceState) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(directory.path().join("market.sqlite3"))
+            .await
+            .unwrap();
+        let (selected_league, _) = watch::channel(None);
+        let state = ServiceState::new(store, "test/0.1", selected_league);
+        *state.leagues.write().await = Some(CachedLeagues {
+            fetched_at: Instant::now(),
+            options: vec![LeagueOption {
+                id: "Standard".to_owned(),
+                name: "Standard".to_owned(),
+            }],
+        });
+        state.gem_overviews.write().await.insert("Standard".to_owned(), CachedGemOverview {
+            checked_at: Instant::now(),
+            etag: None,
+            overview: gem_market_overview("Standard", serde_json::from_str(
+                r#"{"lines":[{"id":1,"name":"Fireball","chaosValue":2,"gemLevel":1,"gemQuality":0,"count":12,"listingCount":12}]}"#,
+            ).unwrap()),
+        });
+        state.exchange_prices.write().await.insert(
+            ("Standard".to_owned(), "Currency".to_owned()),
+            CachedExchangePrices {
+                checked_at: Instant::now(),
+                etag: None,
+                overview: current_price_overview("Standard", "Currency", serde_json::from_str(
+                    r#"{"core":{"primary":"chaos","rates":{},"items":[{"id":"chaos","name":"Chaos Orb"}]},
+                        "lines":[{"id":"gcp","primaryValue":1}],"items":[{"id":"gcp","name":"Gemcutter's Prism"}]}"#,
+                ).unwrap()),
+            },
+        );
+        (directory, state)
+    }
+
+    async fn analysis_response(app: Router, uri: &str) -> GemAnalysisOverview {
+        let response = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn analysis_route_records_deduplicates_and_reads_immutable_snapshots_without_provider_access()
+     {
+        let (_directory, mut state) = cached_analysis_state().await;
+        let initial = analysis_response(
+            router(state.clone()),
+            "/api/v1/gem-analysis?league=Standard",
+        )
+        .await;
+        let first = initial.snapshot.clone().unwrap();
+        assert_eq!(initial.snapshots.len(), 1);
+        let repeated = analysis_response(
+            router(state.clone()),
+            "/api/v1/gem-analysis?league=Standard",
+        )
+        .await;
+        assert_eq!(repeated.snapshot, initial.snapshot);
+        assert_eq!(repeated.snapshots.len(), 1);
+        state
+            .gem_overviews
+            .write()
+            .await
+            .get_mut("Standard")
+            .unwrap()
+            .overview
+            .gems[0]
+            .chaos_value = Some("20".to_owned());
+        state
+            .exchange_prices
+            .write()
+            .await
+            .get_mut(&("Standard".to_owned(), "Currency".to_owned()))
+            .unwrap()
+            .overview
+            .lines[0]
+            .primary_value = Some("9".to_owned());
+        let latest = analysis_response(
+            router(state.clone()),
+            "/api/v1/gem-analysis?league=Standard",
+        )
+        .await;
+        assert_ne!(latest.snapshot, initial.snapshot);
+        assert_eq!(latest.snapshots[0], latest.snapshot.unwrap());
+        assert_eq!(latest.snapshots[1], first);
+
+        state.user_agent = "\n".into();
+        *state.leagues.write().await = None;
+        state.gem_overviews.write().await.clear();
+        state.exchange_prices.write().await.clear();
+        let historical = analysis_response(
+            router(state),
+            &format!("/api/v1/gem-analysis?league=Standard&snapshot={}", first.id),
+        )
+        .await;
+        assert_eq!(historical.data, initial.data);
+        assert_eq!(historical.snapshot, Some(first));
+        assert_eq!(
+            historical.data.prices.unwrap().lines[0]
+                .primary_value
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_route_preserves_independent_provider_errors_without_substituting_current_or_saved_prices()
+     {
+        for fail_gems in [true, false] {
+            let (_directory, mut state) = cached_analysis_state().await;
+            state.user_agent = "\n".into();
+            if fail_gems {
+                state
+                    .gem_overviews
+                    .write()
+                    .await
+                    .get_mut("Standard")
+                    .unwrap()
+                    .checked_at = Instant::now() - GEM_OVERVIEW_CACHE_TTL - Duration::from_secs(1);
+            } else {
+                state
+                    .exchange_prices
+                    .write()
+                    .await
+                    .get_mut(&("Standard".to_owned(), "Currency".to_owned()))
+                    .unwrap()
+                    .checked_at =
+                    Instant::now() - EXCHANGE_PRICE_CACHE_TTL - Duration::from_secs(1);
+            }
+            let overview = analysis_response(
+                router(state.clone()),
+                "/api/v1/gem-analysis?league=Standard",
+            )
+            .await;
+            if fail_gems {
+                assert!(overview.data.gems.is_none());
+                assert!(
+                    overview
+                        .data
+                        .gem_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("HTTP 502")
+                );
+                assert!(overview.data.prices.is_some());
+                assert!(overview.snapshot.is_none());
+                assert!(overview.snapshots.is_empty());
+            } else {
+                assert!(overview.data.gems.is_some());
+                assert!(overview.data.prices.is_none());
+                assert!(
+                    overview
+                        .data
+                        .price_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("HTTP 502")
+                );
+                let saved = analysis_response(
+                    router(state),
+                    &format!(
+                        "/api/v1/gem-analysis?league=Standard&snapshot={}",
+                        overview.snapshot.unwrap().id,
+                    ),
+                )
+                .await;
+                assert_eq!(saved.data, overview.data);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn analysis_route_rejects_missing_cross_league_and_invalid_snapshot_ids() {
+        let (_directory, state) = cached_analysis_state().await;
+        let initial = analysis_response(
+            router(state.clone()),
+            "/api/v1/gem-analysis?league=Standard",
+        )
+        .await;
+        let id = initial.snapshot.unwrap().id;
+        for (uri, status) in [
+            (
+                format!("/api/v1/gem-analysis?league=Other&snapshot={id}"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/api/v1/gem-analysis?league=Standard&snapshot=999999".to_owned(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/api/v1/gem-analysis?league=Standard&snapshot=0".to_owned(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/api/v1/gem-analysis?league=Standard&snapshot=-1".to_owned(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/api/v1/gem-analysis?league=Standard&snapshot=invalid".to_owned(),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = router(state.clone())
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
+    }
+
+    #[tokio::test]
+    async fn analysis_route_keeps_an_older_pinned_instant_beyond_the_recent_menu_limit() {
+        let (_directory, state) = cached_analysis_state().await;
+        let initial = analysis_response(
+            router(state.clone()),
+            "/api/v1/gem-analysis?league=Standard",
+        )
+        .await;
+        let first = initial.snapshot.unwrap();
+        let mut data = initial.data;
+        for index in 0..200 {
+            data.gems.as_mut().unwrap().gems[0].chaos_value = Some((index + 3).to_string());
+            state
+                .store
+                .record_gem_analysis_snapshot(
+                    "Standard",
+                    &data,
+                    first.captured_at + chrono::Duration::seconds(index + 1),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            state
+                .store
+                .gem_analysis_snapshots("Standard")
+                .await
+                .unwrap()
+                .len(),
+            200
+        );
+        let saved = analysis_response(
+            router(state),
+            &format!("/api/v1/gem-analysis?league=Standard&snapshot={}", first.id,),
+        )
+        .await;
+        assert_eq!(saved.snapshots.len(), 201);
+        assert_eq!(saved.snapshots.last(), Some(&first));
+        assert_eq!(saved.snapshot, Some(first));
+    }
+
+    #[tokio::test]
+    async fn cors_allows_only_configured_origins_and_json_get_post() {
+        let app = Router::new()
+            .route("/health", get(health))
+            .layer(cors_layer(vec![
+                HeaderValue::from_static("http://tauri.localhost"),
+                HeaderValue::from_static("https://market.example"),
+            ]));
+
+        for origin in [
+            "http://tauri.localhost",
+            "https://market.example",
+            "https://untrusted.example",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("OPTIONS")
+                        .uri("/health")
+                        .header("origin", origin)
+                        .header("access-control-request-method", "POST")
+                        .header("access-control-request-headers", "content-type")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if origin == "https://untrusted.example" {
+                assert!(
+                    response
+                        .headers()
+                        .get("access-control-allow-origin")
+                        .is_none()
+                );
+            } else {
+                assert_eq!(response.headers()["access-control-allow-origin"], origin);
+                assert_eq!(
+                    response.headers()["access-control-allow-methods"],
+                    "GET,POST"
+                );
+                assert_eq!(
+                    response.headers()["access-control-allow-headers"],
+                    "content-type"
+                );
+            }
+            assert!(
+                response
+                    .headers()
+                    .get("access-control-allow-credentials")
+                    .is_none()
+            );
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("origin", "http://tauri.localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            "http://tauri.localhost"
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
     #[test]
     fn current_price_mapping_resolves_item_and_currency_names() {
         let response: ninja_fetch::ExchangeOverview = serde_json::from_str(
@@ -747,7 +1191,8 @@ mod tests {
                     league: "Standard".to_owned(),
                     fetched_at: Utc::now(),
                     gems: vec![GemMarketLine {
-                        name: "Fireball".to_owned(),
+                        name: "Cleave of Rage".to_owned(),
+                        gem_kind: Some("transfigured".to_owned()),
                         variant: Some("20/20".to_owned()),
                         gem_level: Some(20),
                         gem_quality: Some(20),
@@ -778,6 +1223,27 @@ mod tests {
         assert_eq!(overview.league, "Standard");
         assert_eq!(overview.gems[0].variant.as_deref(), Some("20/20"));
         assert_eq!(overview.gems[0].chaos_value.as_deref(), Some("10"));
+        assert_eq!(overview.gems[0].gem_kind.as_deref(), Some("transfigured"));
+    }
+
+    #[test]
+    fn gem_mapping_preserves_provider_categories_without_guessing_from_names() {
+        let source: ninja_fetch::ItemOverview = serde_json::from_str(
+            r#"{"lines": [
+                {"id": 1, "name": "Empower Support", "metadata": {"gemKind": "exceptional"}},
+                {"id": 2, "name": "Cleave of Rage", "metadata": {"gemKind": "transfigured"}},
+                {"id": 3, "name": "Sunder of Trarthus", "metadata": {"gemKind": "trarthus"}},
+                {"id": 4, "name": "Purity of Fire"},
+                {"id": 5, "name": "Future Gem", "metadata": {"gemKind": "future"}}
+            ]}"#,
+        )
+        .unwrap();
+        let mapped = gem_market_overview("Standard", source);
+        assert_eq!(mapped.gems[0].gem_kind.as_deref(), Some("exceptional"));
+        assert_eq!(mapped.gems[1].gem_kind.as_deref(), Some("transfigured"));
+        assert_eq!(mapped.gems[2].gem_kind.as_deref(), Some("trarthus"));
+        assert_eq!(mapped.gems[3].gem_kind, None);
+        assert_eq!(mapped.gems[4].gem_kind.as_deref(), Some("future"));
     }
 
     #[tokio::test]

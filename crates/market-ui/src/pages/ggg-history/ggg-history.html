@@ -1,0 +1,20 @@
+<bindable name="model"></bindable>
+
+<section with.bind="model" aria-label="GGG history" class="page">
+  <p class="muted">Stored GGG aggregate history for ${selectedLeagueName}. Raw ratios are not executable buy/sell prices.</p>
+  <p if.bind="historyError" class="error" role="alert">${historyError}</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>League</th><th>Instrument</th><th>Volume by side</th><th>Raw ratio range</th><th>Page cursor</th></tr></thead>
+      <tbody>
+        <tr repeat.for="market of markets">
+          <td>${market.league}</td><td>${pair(market.market_pair)}</td>
+          <td>${sideValues(market.volume_traded)}</td>
+          <td>low [${sideValues(market.lowest_ratio)}] high [${sideValues(market.highest_ratio)}]</td>
+          <td>${market.next_change_id}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p if.bind="!markets.length && !historyError" class="empty">${loading ? 'Loading GGG history...' : 'No stored GGG aggregate rows for ' + selectedLeagueName + '. The feed begins at retained history, so current data may take time to arrive.'}</p>
+  </div>
+</section>

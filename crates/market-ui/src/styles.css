@@ -1,0 +1,70 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #e6e6e6;
+  background: #0b0b0b;
+  font-size: 14px;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+market-app { display: block; }
+current-prices, gem-flipping, ggg-history { display: contents; }
+main { height: 100dvh; display: flex; flex-direction: column; padding: 0 24px 16px; }
+button, input, select { font: inherit; color: inherit; }
+button, select, summary, input:not([type="checkbox"]) {
+  background: #161616;
+  border: 1px solid #484848;
+  border-radius: 4px;
+  padding: 7px 10px;
+}
+button, summary { cursor: pointer; }
+button:hover, summary:hover { background: #242424; }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid #bdbdbd; outline-offset: 2px; }
+button.active { color: #f0f0f0; border-color: #777777; background: #242424; }
+label { display: inline-flex; align-items: center; gap: 8px; }
+input[type="checkbox"] { accent-color: #bdbdbd; }
+.app-header { display: flex; flex-shrink: 0; align-items: center; gap: 16px; padding: 12px 0; margin-bottom: 12px; border-bottom: 1px solid #333333; overflow-x: auto; }
+.app-header nav { display: flex; flex-shrink: 0; gap: 8px; white-space: nowrap; }
+.app-header > button { flex-shrink: 0; }
+.league-picker { flex-shrink: 0; margin-left: auto; }
+.muted { color: #aaaaaa; }
+.page { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 12px; }
+p { margin: 0; }
+.toolbar, .lens-controls, .confidence-controls, .search-controls, .strategy-list { display: flex; align-items: center; gap: 8px; }
+.toolbar { justify-content: space-between; flex-wrap: wrap; }
+.lens-controls { flex-wrap: wrap; }
+.lens-price { width: 70px; }
+.confidence-controls { flex-shrink: 0; }
+.confidence-controls label { gap: 4px; }
+.confidence-controls .confidence-threshold { width: 48px; padding: 7px 6px; }
+.instant-picker { width: 140px; }
+.type-filter { position: relative; width: 132px; min-width: 0; flex: 0 0 132px; }
+.type-filter > summary { display: flex; align-items: center; justify-content: space-between; gap: 6px; list-style: none; padding: 7px 8px; }
+.type-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.type-filter > summary::-webkit-details-marker { display: none; }
+.type-options { position: absolute; top: calc(100% + 6px); left: 0; z-index: 3; width: 100%; max-height: 60dvh; overflow-y: auto; display: grid; gap: 4px; padding: 4px; background: #161616; border: 1px solid #484848; border-radius: 4px; box-shadow: 0 8px 24px #0008; }
+.type-list { list-style: none; margin: 0; padding: 0; }
+.type-list button { width: 100%; padding: 6px 8px; border-color: transparent; background: transparent; text-align: left; }
+.type-list button[aria-pressed="true"] { background: #303030; }
+.type-list button:hover { background: #3a3a3a; }
+.table-scroll { flex: 1; min-height: 0; overflow: auto; border: 1px solid #282828; border-radius: 4px; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; text-align: left; font-variant-numeric: tabular-nums; }
+th { position: sticky; top: 0; z-index: 1; background: #161616; color: #aaaaaa; font-size: 12px; text-transform: uppercase; }
+th, td { padding: 10px 12px; border-bottom: 1px solid #282828; white-space: nowrap; }
+th button { border: 0; padding: 0; background: none; text-transform: uppercase; font: inherit; }
+tbody tr:hover { background: #161616; }
+.gem-name { border: 0; background: none; padding: 0; text-align: left; user-select: text; }
+.gem-name:hover { text-decoration: underline; background: none; }
+.confidence { display: inline-block; font-size: 10px; margin-left: 8px; color: #e6b96b; }
+.positive { color: #91d5b3; }
+.negative, .error { color: #e28c82; }
+.banner { padding: 12px; margin-top: 12px; border: 1px solid #854c47; background: #161616; border-radius: 4px; }
+.empty { padding: 40px 20px; text-align: center; color: #aaaaaa; white-space: normal; }
+footer { display: flex; justify-content: center; align-items: center; gap: 16px; }
+
+@media (max-width: 760px) {
+  main { padding: 0 12px 12px; }
+  .strategy-list { flex-wrap: wrap; }
+}

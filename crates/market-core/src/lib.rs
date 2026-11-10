@@ -71,8 +71,31 @@ pub struct GemMarketOverview {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GemAnalysisData {
+    pub gems: Option<GemMarketOverview>,
+    pub gem_error: Option<String>,
+    pub prices: Option<CurrentExchangePriceOverview>,
+    pub price_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GemSnapshotOption {
+    pub id: i64,
+    pub captured_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GemAnalysisOverview {
+    pub snapshot: Option<GemSnapshotOption>,
+    pub data: GemAnalysisData,
+    pub snapshots: Vec<GemSnapshotOption>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GemMarketLine {
     pub name: String,
+    #[serde(default)]
+    pub gem_kind: Option<String>,
     pub variant: Option<String>,
     pub gem_level: Option<u8>,
     pub gem_quality: Option<u8>,
@@ -197,6 +220,14 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    #[test]
+    fn gem_lines_without_category_metadata_remain_readable() {
+        let line: GemMarketLine =
+            serde_json::from_str(r#"{"name":"Fireball","corrupted":false}"#).unwrap();
+        assert_eq!(line.gem_kind, None);
+        assert!(line.sparkline.is_empty());
+    }
 
     fn quote(source: PriceSource, amount: Decimal) -> MarketQuote {
         MarketQuote {

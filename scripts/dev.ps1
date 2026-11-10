@@ -1,13 +1,26 @@
 [CmdletBinding()]
+param(
+    [switch]$Web,
+    [switch]$Deprecated
+)
+
 $ErrorActionPreference = "Stop"
 
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
+$frontendRoot = Join-Path $workspaceRoot "crates\market-ui"
 $logDirectory = Join-Path $env:TEMP "Faustus"
 $stdoutLog = Join-Path $logDirectory "market-service.stdout.log"
 $stderrLog = Join-Path $logDirectory "market-service.stderr.log"
 $userAgent = "Faustus/0.1.0"
 $quotedUserAgent = '"' + $userAgent + '"'
-$serviceArguments = "run -p market-service -- serve --user-agent $quotedUserAgent"
+$serviceArguments = "serve --user-agent $quotedUserAgent"
+
+if ($Web -and $Deprecated) {
+    throw "Choose either -Web or -Deprecated, not both."
+}
+if (-not $Deprecated -and -not (Test-Path (Join-Path $frontendRoot "node_modules"))) {
+    throw "Install frontend dependencies first: cd crates\market-ui; npm ci"
+}
 
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 
@@ -16,8 +29,24 @@ if ($existingListener) {
     throw "Port 8787 is already in use. Stop the existing service before using this launcher."
 }
 
+Push-Location $workspaceRoot
+try {
+    & cargo build -p market-service
+    if ($LASTEXITCODE -ne 0) {
+        throw "The market service failed to build."
+    }
+    $metadata = & cargo metadata --format-version 1 --no-deps
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to locate the Cargo build directory."
+    }
+    $targetDirectory = ($metadata | ConvertFrom-Json).target_directory
+} finally {
+    Pop-Location
+}
+
+$serviceExecutable = Join-Path $targetDirectory "debug\market-service.exe"
 $serviceProcess = Start-Process `
-    -FilePath "cargo" `
+    -FilePath $serviceExecutable `
     -ArgumentList $serviceArguments `
     -WorkingDirectory $workspaceRoot `
     -WindowStyle Hidden `
@@ -56,11 +85,18 @@ try {
 
     Write-Host "Market service is ready at http://127.0.0.1:8787"
     Write-Host "Service logs: $logDirectory"
-    Push-Location $workspaceRoot
+    $launchDirectory = if ($Deprecated) { $workspaceRoot } else { $frontendRoot }
+    Push-Location $launchDirectory
     try {
-        & cargo run -p market-ui --bin faustus-desktop
+        if ($Deprecated) {
+            & cargo run -p market-ui-deprecated --bin faustus-desktop-deprecated
+        } elseif ($Web) {
+            & npm run dev
+        } else {
+            & npm run tauri -- dev
+        }
         if ($LASTEXITCODE -ne 0) {
-            throw "The GPUI desktop app exited with code $LASTEXITCODE."
+            throw "The frontend exited with code $LASTEXITCODE."
         }
     } finally {
         Pop-Location
@@ -68,6 +104,6 @@ try {
 } finally {
     $serviceProcess.Refresh()
     if (-not $serviceProcess.HasExited) {
-        & taskkill.exe /PID $serviceProcess.Id /T /F *> $null
+        Stop-Process -Id $serviceProcess.Id
     }
 }

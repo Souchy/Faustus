@@ -863,6 +863,7 @@ mod tests {
     fn gem(level: u8, quality: u8, corrupted: bool, chaos_value: &str) -> GemMarketLine {
         GemMarketLine {
             name: "Fireball".to_owned(),
+            gem_kind: None,
             variant: Some(format!("{level}/{quality}")),
             gem_level: Some(level),
             gem_quality: Some(quality),

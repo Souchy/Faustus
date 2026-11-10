@@ -1,0 +1,25 @@
+<import from="./pages/current-prices/current-prices.html"></import>
+<import from="./pages/gem-flipping/gem-flipping.html"></import>
+<import from="./pages/ggg-history/ggg-history.html"></import>
+
+<main pointerdown.trigger="closeGemTypesOutside($event)">
+  <header class="app-header">
+    <nav aria-label="Market pages">
+      <button class.bind="page === 'prices' ? 'active' : ''" aria-pressed.bind="page === 'prices'" click.trigger="setPage('prices')">Current prices</button>
+      <button class.bind="page === 'gems' ? 'active' : ''" aria-pressed.bind="page === 'gems'" click.trigger="setPage('gems')">Gem flipping</button>
+      <button class.bind="page === 'history' ? 'active' : ''" aria-pressed.bind="page === 'history'" click.trigger="setPage('history')">GGG history</button>
+    </nav>
+    <label class="league-picker">League
+      <select aria-label="League" value.bind="selectedLeagueId" change.trigger="loadDashboard($event.target.value)">
+        <option if.bind="!leagues.length" value="">Loading leagues...</option>
+        <option repeat.for="league of leagues" value.bind="league.id">${league.name}</option>
+      </select>
+    </label>
+    <button id="refresh" click.trigger="loadDashboard()" disabled.bind="loading">${loading ? 'Loading...' : 'Refresh'}</button>
+  </header>
+
+  <p if.bind="error" class="error banner" role="alert">${error}</p>
+  <current-prices if.bind="page === 'prices'" model.bind="$this"></current-prices>
+  <gem-flipping if.bind="page === 'gems'" model.bind="$this"></gem-flipping>
+  <ggg-history if.bind="page === 'history'" model.bind="$this"></ggg-history>
+</main>

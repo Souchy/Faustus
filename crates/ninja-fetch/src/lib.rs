@@ -65,6 +65,13 @@ pub struct ItemOverviewLine {
     pub chaos_value: Option<Number>,
     pub listing_count: Option<u64>,
     pub spark_line: Option<SparkLine>,
+    pub metadata: Option<ItemMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemMetadata {
+    pub gem_kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -483,5 +490,40 @@ mod tests {
         assert_eq!(overview.lines[1].corrupted, None);
         assert_eq!(overview.lines[1].listing_count, Some(14));
         assert_eq!(overview.lines[0].spark_line.as_ref().unwrap().data.len(), 3);
+    }
+
+    #[test]
+    fn parses_optional_gem_kind_metadata_and_preserves_unknown_categories() {
+        let overview: ItemOverview = serde_json::from_str(
+            r#"{"lines": [
+                {"id": 1, "name": "Empower Support", "metadata": {"gemKind": "exceptional"}},
+                {"id": 2, "name": "Cleave of Rage", "metadata": {"gemKind": "transfigured"}},
+                {"id": 3, "name": "Sunder of Trarthus", "metadata": {"gemKind": "trarthus"}},
+                {"id": 4, "name": "Fireball"},
+                {"id": 5, "name": "Future Gem", "metadata": {"gemKind": "future"}},
+                {"id": 6, "name": "Multistrike Support", "metadata": {}}
+            ]}"#,
+        )
+        .unwrap();
+        let kinds = overview
+            .lines
+            .iter()
+            .map(|line| {
+                line.metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.gem_kind.as_deref())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                Some("exceptional"),
+                Some("transfigured"),
+                Some("trarthus"),
+                None,
+                Some("future"),
+                None
+            ]
+        );
     }
 }

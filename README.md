@@ -1,18 +1,28 @@
 # Faustus
 
-Faustus is a Rust workspace for recording and inspecting Path of Exile market data. The first implementation slice contains GGG exchange ingestion, poe.ninja currency/fragment snapshots, SQLite storage, a local read-only service, and a GPUI desktop/WASM frontend.
+Faustus records and inspects Path of Exile market data. The Rust workspace contains GGG exchange ingestion, poe.ninja currency/fragment snapshots, SQLite storage, and a market service. The Aurelia v2/TypeScript frontend runs in a browser or a Tauri v2 desktop shell. The previous GPUI implementation is preserved in `crates/market-ui-deprecated`.
 
 ## Run Locally
 
-Start the backend and Windows desktop app together:
+Prerequisites: Rust 1.92+, Node.js 22.12+ (or a newer supported Node release), npm, and the [Tauri Windows prerequisites](https://v2.tauri.app/start/prerequisites/) (MSVC build tools and WebView2). Aurelia v2 currently uses the pinned `2.0.0-rc.2` release.
+
+Install frontend dependencies once:
+
+```powershell
+Push-Location crates\market-ui
+npm ci
+Pop-Location
+```
+
+Start the backend and Windows Tauri app together:
 
 ```powershell
 .\scripts\dev.ps1
 ```
 
-The script starts the loopback backend, waits for its health endpoint, then launches GPUI in the foreground. Closing the desktop app stops the backend. Service logs are written under `$env:TEMP\Faustus`.
+The development script builds and starts the loopback backend, waits for its health endpoint, then launches Tauri/Vite in the foreground. Closing the desktop app stops the development backend. Service logs are written under `$env:TEMP\Faustus`. Use `.\scripts\dev.ps1 -Web` to start the same service with the browser frontend at `http://127.0.0.1:5173`, or `-Deprecated` to launch GPUI instead.
 
-The GPUI client loads the poe.ninja economy leagues, defaults to the first entry (the current temporary softcore trade league), and tells the service which league to watch. The service validates that selection and starts collecting immediately. Changing the dropdown switches the collector to the newly selected league. League options are cached by the service for 15 minutes.
+The client loads the poe.ninja economy leagues, uses the service's valid selection or defaults to the first entry (the current temporary softcore trade league), and tells the service which league to watch. The service validates that selection and starts collecting immediately. Changing the dropdown switches the collector to the newly selected league. League options are cached by the service for 15 minutes.
 
 To run the backend separately:
 
@@ -28,15 +38,20 @@ cargo run -p market-service -- ingest-once --league "LEAGUE_ID"
 
 Each `ingest-once` run uses the same provider clients and cache validators as the scheduled collector.
 
-When running the backend separately, launch the Windows GPUI frontend in another terminal:
+When running the backend separately, launch the desktop frontend in another terminal:
 
 ```powershell
-cargo run -p market-ui --bin faustus-desktop
+cd crates\market-ui
+npm run tauri -- dev
 ```
 
-The frontend reads the service at `http://127.0.0.1:8787`. Its Current prices tab shows poe.ninja's current exchange estimates for the selected league, quoted in the overview's primary currency (Chaos for Standard), with volume, the dominant paired currency, trend, and fetch time. These are aggregate estimates, not executable buy/sell orders. The GGG history tab shows recorded pair snapshots and raw ratios separately.
+Use `npm run dev` instead for the browser frontend. Vite proxies `/api` and `/health` to `http://127.0.0.1:8787`; both clients use ordinary HTTP `fetch`, not Tauri commands or an HTTP plugin. The packaged desktop app also requires an independently running market service; it does not start, bundle, or stop one.
 
-The Gem flipping page compares poe.ninja SkillGem variants by level, quality, and corruption. Its shared search filters all four strategies, and clicking a gem row carries that gem into the search when switching strategies. Choose a start date from the available seven-point price history; the gem page currently ends at Now, while the shared range model supports selecting both endpoints for future analyses. It estimates level-1-to-max flips, 20% quality upgrades using 20 Gemcutter's Prisms, and the conditional profit of corrupted +1 level or +3% quality outcomes using prices at the selected endpoints. Facetor's Lens is an optional cost in Level Flip with an editable Chaos price and lens count. Variants with fewer than five poe.ninja samples or listings are marked low confidence; the checkbox includes or filters them. Lens XP varies and is not included in the gem feed. Estimates exclude trade fees, leveling time, failed corruptions, and market slippage.
+The Current prices tab shows poe.ninja's current exchange estimates for the selected league, quoted in the overview's primary currency (Chaos for Standard), with volume, the dominant paired currency, trend, and fetch time. These are aggregate estimates, not executable buy/sell orders. The GGG history tab shows recorded pair snapshots and raw ratios separately.
+
+The Gem flipping page compares poe.ninja SkillGem variants by level, quality, and corruption. Its shared search filters all four strategies, and clicking a gem row carries that gem into the search when switching strategies. The **As of** selector defaults to **Latest**, followed by locally saved instants, newest first. Buy, sell, confidence counts, and material prices all come from the selected snapshot, not different sparkline endpoints. Each snapshot preserves the latest known gem and currency overviews together, including their separate fetch times; the feeds are not necessarily updated simultaneously. The Current prices tab always uses current data, even when viewing a saved gem instant. Changing leagues resets the instant to Latest; refreshing the same league preserves a pinned instant.
+
+The strategies estimate level-1-to-max flips, 20% quality upgrades using 20 Gemcutter's Prisms, and conditional corrupted +1 level or +3% quality profits. Facetor's Lens is an optional, manually entered Chaos cost in Level Flip, including when viewing a saved instant. Its price defaults to 50 Chaos, with one Lens per flip and no quantity control. **Min** in the compact confidence controls configures the sample/listing threshold (default 10, a positive whole number): both buy and sell variants must have at least that many samples and listings. Missing counts are low confidence. Low-confidence gems are excluded by default; **Low conf** includes them with a LOW CONF badge. Invalid thresholds show an error instead of silently using another value. Lens XP varies and is not included in the gem feed. Estimates exclude trade fees, leveling time, failed corruptions, and market slippage.
 
 The service also exposes:
 
@@ -46,9 +61,53 @@ The service also exposes:
 - `GET /api/v1/status`
 - `GET /api/v1/exchange/prices?league=LEAGUE_ID&type=Currency` (also supports `Fragment`; responses are cached for 15 minutes and revalidated with ETags)
 - `GET /api/v1/gems?league=LEAGUE_ID` (poe.ninja SkillGem variants, prices, listing counts, and sparkline history; cached for five minutes)
+- `GET /api/v1/gem-analysis?league=LEAGUE_ID` (latest gem/material data, explicit independent provider errors, and saved snapshot options; records a snapshot when gem data is available)
+- `GET /api/v1/gem-analysis?league=LEAGUE_ID&snapshot=SNAPSHOT_ID` (immutable saved gem/material data for that league; database-only, without contacting providers; missing or cross-league IDs return 404)
 - `GET /api/v1/exchange/markets?league=LEAGUE_NAME&limit=100`
 
 The market query returns the latest stored snapshot for each pair in each league. The raw ratio and volume fields remain keyed by item identifier; the app does not infer a buy/sell price from them yet.
+
+## Build, Test, and Deploy the UI
+
+Run these commands from `crates\market-ui`:
+
+```powershell
+npm test                    # Analysis, API transport, and dashboard state tests
+npm run build               # Type-check and create standalone web assets in dist
+npx playwright install chromium   # Once, for browser tests
+npm run test:e2e            # Tests the production web build; mocks provider data
+npm run tauri -- build      # Builds desktop assets, executable, and Windows NSIS installer
+```
+
+The web build defaults to same-origin `/api/v1/...` requests. Deploy `dist` as static assets and reverse-proxy `/api` to the market service under the same HTTPS origin. It has no dependency on a Tauri runtime. Set `VITE_API_BASE_URL=https://your-api.example` at build time only when hosting the API on a different origin, and allow the frontend's exact origin on the service:
+
+```powershell
+cargo run -p market-service -- serve --allow-origin https://your-frontend.example
+```
+
+`--allow-origin` can be repeated; supplying it replaces the default desktop origins (`tauri://localhost`, `http://tauri.localhost`, and `https://tauri.localhost`). CORS permits GET/POST and JSON Content-Type, without credentials or wildcard origins. Same-origin web requests and Vite's development proxy do not require extra CORS origins.
+
+Desktop packaging uses `.env.desktop` to point directly at `http://127.0.0.1:8787`. Override `VITE_API_BASE_URL` when building for another service, and also update `connect-src` in `src-tauri/tauri.conf.json` to allow that exact service origin. No Tauri command capabilities are granted. A remote API should use HTTPS. The service is still unauthenticated and its collector selection is global: CORS is not authentication, and a public multi-user deployment needs access control and a decision about collector ownership before exposing selection or ingestion.
+
+The GPUI crate and its tests remain available:
+
+```powershell
+cargo run -p market-ui-deprecated --bin faustus-desktop-deprecated
+cargo test -p market-ui-deprecated
+```
+
+The replacement implements tested TypeScript gem calculations, including same-instant snapshots, configurable confidence filtering, material costs, sorting, the 100-result cap, and 50-row batches. The sortable Type column and shared type filter use one category per gem: Skill, Support, Exceptional, Transfigured, or Trarthus. Special categories come from poe.ninja's `metadata.gemKind`, exposed by the service as `gem_kind`, and take precedence over Skill/Support. Untagged names ending in " Support" are Support; other untagged gems are Skill. Unrecognized provider categories appear as Unknown rather than being guessed from gem names. Type, search, and confidence settings persist across strategies, instants, and refreshes and are applied before the 100-result cap. Tables use native browser scrolling, including middle-button autoscroll where supported by the browser/platform. Search persists across gem strategies; clicking a gem name selects that name as the search.
+
+The Type dropdown is a multi-select list: click a type to toggle its highlight, without checkboxes. The exclusive **All** option is selected by default, while individual types are unselected. Choosing a type deselects All; choosing All clears individual selections and includes every category (including Unknown). With individual types selected, a gem matches any of them. Deselecting every individual type shows no opportunities. Its fixed-width summary shows All, None, one selected name, or a count; the tooltip retains the full selection. Selections persist across strategies, snapshots, and refreshes. The dropdown supports keyboard navigation, Escape to close, and clicking or tabbing outside to dismiss. The date dropdown uses compact Canadian date labels such as `Nov 9, 19:05` in the browser's local timezone, with full local dates and timezone names in option tooltips. Stored timestamps and snapshot ordering remain unchanged.
+
+All UI dates use Canadian English (`en-CA`) formatting and the browser's local timezone. Full timestamps use year-month-day dates, 24-hour time, and a timezone name; snapshot options use an abbreviated month. Latest includes the latest gem overview's fetch time (for example, `Latest 19:56`), with its full local timestamp in the tooltip, even when viewing a saved instant. The gem page omits strategy descriptions and the data/explanation caption; calculation caveats remain documented above. API and database timestamps remain unchanged.
+
+The Aurelia application registers `MarketApi` as a container-scoped singleton. `MarketApp` obtains it with `resolve(MarketApi)`; tests can override that registration and construct the app through a DI container.
+
+Frontend source organization:
+- `src/pages/current-prices/`, `src/pages/gem-flipping/`, and `src/pages/ggg-history/` contain the individual Aurelia page templates.
+- `src/core/` contains the HTTP client, API types, gem-analysis calculations, and their unit tests.
+- `src/` retains the entry point, environment declarations, app shell/shared dashboard state, app tests, and shared styles. Page components receive that state through an explicit `model` binding, keeping filters and selections intact when switching pages.
 
 ## Data Collection Notes
 
@@ -56,7 +115,9 @@ GGG's documented exchange endpoint is a historical cursor feed. A request withou
 
 poe.ninja's documented economy API provides Currency and Fragment stash overviews for stored snapshots, plus current exchange overviews for the prices tab. Current exchange responses are held in a per-league/category 15-minute service cache and revalidated with ETags. Requests go through the service, not directly from the frontend.
 
-The WASM frontend compile check uses nightly because GPUI Kit's web backend enables `wasm_thread`. Static asset packaging, hosting, browser interaction testing, and screenshots have not yet been added. For a same-origin deployment, serve the WASM app and API behind the same HTTPS origin.
+Gem-analysis snapshots are recorded in SQLite when the dashboard loads, refreshes, or requests Latest; there is no additional background polling or historical backfill. Identical cached gem/material bundles reuse their existing snapshot. The selector lists the 200 most recent saved instants (plus a pinned older instant, if needed); older records remain stored. Snapshots survive service restarts. Previously collected Currency/Fragment stash history cannot reconstruct historical gem variants. The [documented poe.ninja API](https://poe.ninja/docs/api) only exposes current overviews, and its league list supplies no league-start timestamps, so saved instants use actual capture timestamps displayed in local time rather than invented Hour/Day/Week labels. If material prices failed at capture time, that failure is preserved and material-dependent strategies stay unavailable for that instant; current material prices are never substituted. The service must be restarted after updating to install the new snapshot-table migration and HTTP endpoint.
+
+Only the deprecated GPUI WASM frontend needs nightly because GPUI Kit's web backend enables `wasm_thread`. The Aurelia web frontend uses the standard Vite build and does not compile Rust to WebAssembly.
 
 GGG's API and poe.ninja's economy API can change without notice. Respect their rate limits and caching guidance. poe.ninja permits use of its documented economy endpoints but prohibits directly replicating its site; this app is intended for cross-source market analysis. Do not use undocumented site endpoints.
 
@@ -69,6 +130,7 @@ This product isn't affiliated with or endorsed by Grinding Gear Games in any way
 - `ninja-fetch`: documented economy client, ETag handling, and overview DTOs.
 - `market-store`: SQLite migrations, transactional cursor recording, and snapshot queries.
 - `market-service`: one-shot ingestion CLI and local read-only HTTP API.
-- `market-ui`: GPUI desktop and single-threaded WebAssembly frontends; major pages live under `src/pages/`.
+- `market-ui`: Aurelia v2/Vite frontend in `src`, with the Tauri v2 Rust desktop shell in `src-tauri`.
+- `market-ui-deprecated`: preserved GPUI desktop and single-threaded WebAssembly frontends; major pages live under `src/pages/`.
 
-The desktop and WebAssembly frontends use GPUI Kit 0.9.1, which pins the matching GPUI 0.3.12 snapshot and platform crates. Rust 1.92 or newer is required by the current dependency graph.
+The deprecated frontends use GPUI Kit 0.9.1, which pins the matching GPUI 0.3.12 snapshot and platform crates. Rust 1.92 or newer is required by the current dependency graph.

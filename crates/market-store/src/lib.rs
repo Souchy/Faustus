@@ -2,7 +2,7 @@ use std::{path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use faustus_fetch::{ExchangeCursor, FetchedPage};
-use market_core::ExchangeMarketSnapshot;
+use market_core::{ExchangeMarketSnapshot, GemAnalysisData, GemSnapshotOption};
 use sha2::{Digest, Sha256};
 use sqlx::{
     SqlitePool,
@@ -58,6 +58,73 @@ impl SqliteStore {
 
         migrate(&pool).await?;
         Ok(Self { pool })
+    }
+
+    pub async fn record_gem_analysis_snapshot(
+        &self,
+        league: &str,
+        data: &GemAnalysisData,
+        captured_at: DateTime<Utc>,
+    ) -> Result<GemSnapshotOption, StoreError> {
+        let json = serde_json::to_string(data)?;
+        let hash = content_hash(json.as_bytes());
+        sqlx::query(
+            r#"INSERT INTO gem_analysis_snapshots
+               (league_id, captured_at, content_hash, data_json) VALUES (?, ?, ?, ?)
+               ON CONFLICT(league_id, content_hash) DO NOTHING"#,
+        )
+        .bind(league)
+        .bind(captured_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        .bind(&hash)
+        .bind(json)
+        .execute(&self.pool)
+        .await?;
+        let (id, captured_at) = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
+            "SELECT id, captured_at FROM gem_analysis_snapshots WHERE league_id = ? AND content_hash = ?",
+        )
+        .bind(league)
+        .bind(hash)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(GemSnapshotOption { id, captured_at })
+    }
+
+    pub async fn gem_analysis_snapshots(
+        &self,
+        league: &str,
+    ) -> Result<Vec<GemSnapshotOption>, StoreError> {
+        let rows = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
+            r#"SELECT id, captured_at FROM gem_analysis_snapshots WHERE league_id = ?
+               ORDER BY captured_at DESC, id DESC LIMIT 200"#,
+        )
+        .bind(league)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, captured_at)| GemSnapshotOption { id, captured_at })
+            .collect())
+    }
+
+    pub async fn gem_analysis_snapshot(
+        &self,
+        league: &str,
+        id: i64,
+    ) -> Result<Option<(GemSnapshotOption, GemAnalysisData)>, StoreError> {
+        let row = sqlx::query_as::<_, (i64, DateTime<Utc>, String)>(
+            "SELECT id, captured_at, data_json FROM gem_analysis_snapshots WHERE league_id = ? AND id = ?",
+        )
+        .bind(league)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|(id, captured_at, json)| {
+            Ok((
+                GemSnapshotOption { id, captured_at },
+                serde_json::from_str(&json)?,
+            ))
+        })
+        .transpose()
     }
 
     pub async fn record_exchange_page(
@@ -321,19 +388,27 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
         .execute(pool)
         .await?;
 
-    let version: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 1")
-            .fetch_optional(pool)
-            .await?;
-    if version.is_none() {
-        let mut transaction = pool.begin().await?;
-        sqlx::raw_sql(include_str!("../migrations/0001_initial.sql"))
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("INSERT INTO schema_migrations (version) VALUES (1)")
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
+    for (version, migration) in [
+        (1_i64, include_str!("../migrations/0001_initial.sql")),
+        (
+            2_i64,
+            include_str!("../migrations/0002_gem_analysis_snapshots.sql"),
+        ),
+    ] {
+        let applied: Option<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = ?")
+                .bind(version)
+                .fetch_optional(pool)
+                .await?;
+        if applied.is_none() {
+            let mut transaction = pool.begin().await?;
+            sqlx::raw_sql(migration).execute(&mut *transaction).await?;
+            sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+                .bind(version)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+        }
     }
 
     Ok(())
@@ -466,5 +541,127 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.ninja_snapshot_count().await.unwrap(), 1);
+    }
+
+    fn analysis(value: &str) -> GemAnalysisData {
+        serde_json::from_value(serde_json::json!({
+            "gems": {
+                "league": "Standard",
+                "fetched_at": "2026-11-09T12:00:00Z",
+                "gems": [{"name": "Fireball", "chaos_value": value, "corrupted": false}]
+            },
+            "gem_error": null,
+            "prices": null,
+            "price_error": "Material prices returned HTTP 502"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gem_snapshots_deduplicate_scope_order_and_survive_reopening() {
+        let (directory, store) = store().await;
+        let first_at = Utc.with_ymd_and_hms(2026, 11, 9, 12, 0, 0).unwrap();
+        let first = store
+            .record_gem_analysis_snapshot("Standard", &analysis("2"), first_at)
+            .await
+            .unwrap();
+        let duplicate = store
+            .record_gem_analysis_snapshot(
+                "Standard",
+                &analysis("2"),
+                first_at + chrono::Duration::minutes(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate, first);
+        let newer = store
+            .record_gem_analysis_snapshot(
+                "Standard",
+                &analysis("3"),
+                first_at + chrono::Duration::milliseconds(100),
+            )
+            .await
+            .unwrap();
+        let newest = store
+            .record_gem_analysis_snapshot(
+                "Standard",
+                &analysis("4"),
+                first_at + chrono::Duration::milliseconds(110),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.gem_analysis_snapshots("Standard").await.unwrap(),
+            vec![newest, newer, first.clone()],
+        );
+        assert!(
+            store
+                .gem_analysis_snapshot("Other", first.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .gem_analysis_snapshot("Standard", i64::MAX)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .gem_analysis_snapshots("Other")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let reopened = SqliteStore::connect(directory.path().join("market.sqlite3"))
+            .await
+            .unwrap();
+        let (metadata, saved) = reopened
+            .gem_analysis_snapshot("Standard", first.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata, first);
+        assert_eq!(saved, analysis("2"));
+    }
+
+    #[tokio::test]
+    async fn upgrades_an_existing_database_without_changing_provider_snapshots() {
+        let (_directory, store) = store().await;
+        sqlx::query("DROP TABLE gem_analysis_snapshots")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 2")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .record_ninja_snapshot(NinjaSnapshot {
+                league_id: "Standard",
+                category: "Currency",
+                fetched_at: Utc::now(),
+                raw_json: br#"{"lines":[]}"#,
+                etag: None,
+                cache_control: None,
+            })
+            .await
+            .unwrap();
+        migrate(&store.pool).await.unwrap();
+        assert_eq!(store.ninja_snapshot_count().await.unwrap(), 1);
+        store
+            .record_gem_analysis_snapshot("Standard", &analysis("2"), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .gem_analysis_snapshots("Standard")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

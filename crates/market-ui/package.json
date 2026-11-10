@@ -1,0 +1,29 @@
+{
+  "name": "market-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build",
+    "build:desktop": "npm run typecheck && vite build --mode desktop",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "tauri": "tauri",
+    "app": "tauri -- dev"
+  },
+  "dependencies": {
+    "aurelia": "2.0.0-rc.2"
+  },
+  "devDependencies": {
+    "@aurelia/vite-plugin": "2.0.0-rc.2",
+    "@playwright/test": "^1.65.0",
+    "@tauri-apps/cli": "^2.12.4",
+    "@types/node": "^25.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.7",
+    "vitest": "^4.1.12"
+  }
+}

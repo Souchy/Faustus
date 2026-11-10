@@ -1,0 +1,21 @@
+<bindable name="model"></bindable>
+
+<section with.bind="model" aria-label="Current prices" class="page">
+  <p class="muted">poe.ninja current exchange estimates | Quoted in ${prices.primary.name ?? 'Chaos Orb'} | Updated ${timestamp(prices.fetched_at)}</p>
+  <p if.bind="priceError" class="error" role="alert">${priceError}</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Item</th><th>Estimate</th><th>Volume</th><th>Dominant pair</th><th>Trend</th></tr></thead>
+      <tbody>
+        <tr repeat.for="line of prices.lines">
+          <td>${line.name}</td>
+          <td>${line.primary_value ?? '-'} ${prices.primary.id}</td>
+          <td>${line.volume_primary_value ?? '-'} ${prices.primary.id}</td>
+          <td>${line.max_volume_rate != null && line.max_volume_currency != null ? line.max_volume_rate + ' ' + line.max_volume_currency : '-'}</td>
+          <td>${line.sparkline_change != null ? line.sparkline_change + '%' : '-'}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p if.bind="!prices.lines.length && !priceError" class="empty">${loading ? 'Loading current prices...' : 'Current prices for ' + selectedLeagueName + ' are not available yet.'}</p>
+  </div>
+</section>
