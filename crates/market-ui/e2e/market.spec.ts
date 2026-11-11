@@ -1,10 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
-import { categorizedGemOverview, gemAnalysis, gemOverview, prices, status } from '../src/testing/fixtures';
+import { categorizedGemOverview, gemAnalysis, gemOverview, prices, status, economyCategories, economyOverview, economyArchive } from '../src/testing/fixtures';
 
 async function service(page: Page, options: {
   many?: boolean; failPrices?: boolean; lowConfidence?: boolean; categorized?: boolean; trimHistoryOnRefresh?: boolean;
 } = {}) {
   let latestRequests = 0;
+  const archives = [economyArchive('Ancestors', 'completed'), economyArchive('Mirage')];
   const gems = options.categorized ? categorizedGemOverview() : gemOverview();
   if (options.lowConfidence) {
     gems.gems = gems.gems.map((gem) => ({ ...gem, sample_count: 2 }));
@@ -18,13 +19,34 @@ async function service(page: Page, options: {
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.includes('/economy/')) {
+      const query = new URL(request.url()).searchParams;
+      if (path.endsWith('/categories')) return route.fulfill({ json: economyCategories() });
+      if (path.endsWith('/leagues')) return route.fulfill({ json: [{ id: 'Standard', name: 'Standard', live: true }, { id: 'Other', name: 'Other league', live: true }, { id: 'Ancestors', name: 'Ancestors', live: true, archived: true }] });
+      if (path.endsWith('/dates')) return route.fulfill({ json: query.get('league') === 'Standard'
+        ? ['2026-11-09'] : ['2026-07-16', '2026-06-25'] });
+      if (path.endsWith('/overview') || path.endsWith('/refresh')) return options.failPrices
+        ? route.fulfill({ status: 502, body: 'Provider unavailable' }) : route.fulfill({ json: economyOverview(
+        query.get('category') ?? 'Currency', query.get('source') === 'stash' ? 'stash' : 'exchange',
+        query.get('league') ?? 'Standard', query.get('date') ?? '') });
+      if (path.endsWith('/history')) return route.fulfill({ json: { points: [
+        { date: '2026-07-15', price: '1', currency: 'Chaos Orb', granularity: 'daily' },
+        { date: '2026-07-16', price: '2', currency: 'Chaos Orb', granularity: 'daily' },
+      ], coverage: { start: '2026-07-15', end: '2026-07-16' } } });
+      if (path.endsWith('/archives')) return route.fulfill({ json: archives });
+      if (path.endsWith('/import')) {
+        const archive = economyArchive(request.postDataJSON().name, 'completed');
+        archives.splice(1, 1, archive);
+        return route.fulfill({ json: archive });
+      }
+    }
     if (path.endsWith('/leagues')) return route.fulfill({ json: [{ id: 'Standard', name: 'Standard' }, { id: 'Other', name: 'Other league' }] });
     if (path.endsWith('/status')) return route.fulfill({ json: status() });
     if (path.endsWith('/selection')) return route.fulfill({ json: { id: request.postDataJSON().id, name: 'Other league' } });
     if (path.endsWith('/prices')) return options.failPrices
       ? route.fulfill({ status: 502, body: '' }) : route.fulfill({ json: prices() });
     if (path.endsWith('/gems')) return route.fulfill({ json: gems });
-    if (path.endsWith('/gem-analysis')) {
+    if (path.endsWith('/gem-analysis') || path.endsWith('/gem-analysis/refresh')) {
       const saved = new URL(request.url()).searchParams.has('snapshot');
       const analysis = gemAnalysis(gems, new URL(request.url()).searchParams.get('snapshot') === '1');
       if (!saved && ++latestRequests > 1 && options.trimHistoryOnRefresh) {
@@ -45,6 +67,63 @@ async function service(page: Page, options: {
   });
 }
 
+test('economy categories, facets, source views, details and responsive layout', async ({ page }) => {
+  await service(page);
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stash', exact: true }).click();
+  await page.getByRole('button', { name: 'Skill Gems', exact: true }).click();
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
+  await page.getByRole('combobox', { name: 'Gem level', exact: true }).selectOption('21');
+  expect(errors).toEqual([]);
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(1);
+  await expect(page.locator('.economy-item')).toContainText('Corrupted');
+  await page.locator('.economy-item').click();
+  await expect(page.getByRole('article', { name: 'Item details' })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Saved price history in Chaos Orb' })).toBeVisible();
+  await expect(page.locator('.history-chart path')).toHaveAttribute('d', /^M.+L/);
+  await page.getByText('History data (2 observations)', { exact: true }).click();
+  await expect(page.getByRole('table', { name: 'Historical price observations' }).locator('tbody tr')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Back to Skill Gems' }).click();
+  await expect(page.getByRole('combobox', { name: 'Gem level', exact: true })).toHaveValue('21');
+  await page.getByRole('button', { name: 'Maps', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Map tier', exact: true }).selectOption('16');
+  await expect(page.locator('.economy-table')).toContainText('Dunes Map');
+  await page.setViewportSize({ width: 390, height: 800 });
+  await expect(page.getByRole('combobox', { name: 'Economy category', exact: true })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Economy category', exact: true }).selectOption('Currency');
+  await expect(page.locator('.economy-table')).toContainText('Vaal Orb');
+  expect(errors).toEqual([]);
+});
+
+test('historical datasets and import manager do not select an archived league for the collector', async ({ page }) => {
+  await service(page);
+  const selections: string[] = [];
+  page.on('request', (request) => { if (request.url().endsWith('/selection')) selections.push(request.url()); });
+  await page.goto('/');
+  await page.getByRole('combobox', { name: 'Economy dataset', exact: true }).selectOption('Ancestors');
+  await expect(page.getByRole('combobox', { name: 'Economy date', exact: true })).toHaveValue('2026-07-16');
+  await expect(page.getByRole('button', { name: 'Stash', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('combobox', { name: 'League', exact: true })).toHaveValue('Standard');
+  await page.getByRole('button', { name: 'Historical data', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Historical data manager' })).toContainText('Allflame has not been published');
+  await page.getByRole('button', { name: 'Import Mirage', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Browse Mirage', exact: true })).toBeVisible();
+  expect(selections).toEqual([]);
+});
+
+test('archive Browse replaces the live date with an available historical date', async ({ page }) => {
+  await service(page);
+  await page.goto('/');
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Historical data', exact: true }).click();
+  await page.getByRole('button', { name: 'Browse Ancestors', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Economy dataset', exact: true })).toHaveValue('Ancestors');
+  await expect(page.getByRole('combobox', { name: 'Economy date', exact: true })).toHaveValue('2026-07-16');
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
+});
+
 test('main tabs, league and refresh share one row without a branding header', async ({ page }) => {
   await service(page);
   await page.goto('/');
@@ -59,9 +138,14 @@ test('main tabs, league and refresh share one row without a branding header', as
         const bounds = element.getBoundingClientRect();
         return bounds.y + bounds.height / 2;
       }));
-    expect(centers).toHaveLength(5);
+    expect(centers).toHaveLength(4);
     expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(1);
   }
+  const capture = page.waitForRequest((request) =>
+    new URL(request.url()).pathname === '/api/v1/gem-analysis/refresh' && request.method() === 'POST');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  expect(new URL((await capture).url()).searchParams.get('league')).toBe('Standard');
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
 });
 
 test('web UI works without Tauri: prices, all gem strategies, search, Lens and history', async ({ page }) => {
@@ -69,7 +153,7 @@ test('web UI works without Tauri: prices, all gem strategies, search, Lens and h
   page.on('pageerror', (error) => errors.push(error.message));
   await service(page);
   await page.goto('/');
-  await expect(page.getByRole('cell', { name: "Gemcutter's Prism", exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: "Gemcutter's Prism", exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Gem flipping', exact: true }).click();
   await expect(page.locator('td.positive')).toHaveText('38.00c');
   await expect(page.locator('.gem-table th')).toHaveText(['Gem', 'Type', 'Buy', 'Sell', 'Net v', 'ROI', 'Listings']);
@@ -87,6 +171,7 @@ test('web UI works without Tauri: prices, all gem strategies, search, Lens and h
   await page.getByRole('button', { name: 'Add quality', exact: true }).click();
   await expect(page.locator('td.positive')).toHaveText('40.00c');
   await page.getByRole('button', { name: 'Vaal corrupt', exact: true }).click();
+  await expect(page.getByText('EV = expected value.', { exact: false })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Vaal \+/ })).toHaveCount(0);
   await expect(page.locator('td.negative > .weighted-return > .metric-value')).toHaveText('-14.50c');
   await expect(page.locator('.gem-table > table > thead th')).toHaveText(['Gem', 'Type', 'Buy', 'EV', 'Net v', 'ROI', 'Max value', 'Listings']);
@@ -100,15 +185,17 @@ test('web UI works without Tauri: prices, all gem strategies, search, Lens and h
     await metric.hover();
     await expect(tooltip).toBeVisible();
     const table = tooltip.getByRole('table', { name: 'Expected value breakdown' });
-    await expect(table.locator('thead th')).toHaveText(['Outcome', 'Valued variant', 'Chance', 'Resale', 'Chance x resale']);
+    await expect(table.locator('thead th')).toHaveText(['Outcome', 'Valued variant', 'Listings', 'Chance', 'Resale', 'Chance x resale']);
     await expect(table.locator('tbody tr')).toHaveCount(4);
+    await expect(table.locator('tbody tr > td:nth-child(3)')).toHaveText(['12', '12', '12', '12']);
     await expect(table.locator('tbody tr').nth(0).locator('td')).toHaveText([
-      '+1 level', 'Lv21 Q20 corrupted', '12.5%', '140.00c', '17.50c',
+      '+1 level', 'Lv21 Q20 corrupted', '12', '12.5%', '140.00c', '17.50c',
     ]);
     await expect(table.locator('tbody tr').nth(2).locator('td')).toHaveText([
-      'Max level corrupted (including releveled -1)', 'Lv20 Q20 corrupted', '62.5%', '80.00c', '50.00c',
+      'Max level corrupted (including releveled -1)', 'Lv20 Q20 corrupted', '12', '62.5%', '80.00c', '50.00c',
     ]);
     await expect(table.locator('tbody tr').nth(3)).toContainText('Estimate: lowest listed in bucket');
+    await expect(table.locator('tbody tr').nth(3).locator('td').nth(2)).toHaveText('12');
     await expect(table.locator('tfoot tr').nth(0).locator('td')).toHaveText(['100.0%', '', '87.50c']);
     await expect(table.locator('tfoot tr').nth(2).locator('td')).toHaveText(['87.50c - 102.00c', '-14.50c']);
     await expect(table.locator('tfoot tr').nth(3).locator('td')).toHaveText(['-14.50c / 102.00c x 100', '-14.2%']);
@@ -140,8 +227,7 @@ test('web UI works without Tauri: prices, all gem strategies, search, Lens and h
   await expect(page.getByRole('columnheader', { name: /^Sell/ })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: /Max value/ })).toHaveCount(0);
   await expect(page.getByRole('searchbox', { name: 'Search gems' })).toHaveValue('Fireball');
-  await page.getByRole('button', { name: 'GGG history', exact: true }).click();
-  await expect(page.getByRole('cell', { name: 'chaos / divine', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'GGG history', exact: true })).toHaveCount(0);
   const selection = page.waitForRequest((request) => request.url().endsWith('/selection') && request.method() === 'POST');
   await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('Other');
   expect((await selection).postDataJSON()).toEqual({ id: 'Other' });
@@ -292,7 +378,7 @@ test('selects saved instants newest first, retains selection on refresh and keep
   await expect(instant).toHaveValue('1');
   await expect(page.locator('td.positive')).toHaveText('20.00c');
   await page.getByRole('button', { name: 'Current prices', exact: true }).click();
-  await expect(page.getByRole('row').filter({ hasText: "Gemcutter's Prism" }).locator('td').nth(1)).toHaveText('1 chaos');
+  await expect(page.getByRole('row').filter({ hasText: "Gemcutter's Prism" }).locator('td').nth(1)).toHaveText('1Chaos Orb');
   await page.getByRole('button', { name: 'Gem flipping', exact: true }).click();
   await instant.selectOption('latest');
   await expect(page.locator('td.positive')).toHaveText('40.00c');
@@ -317,7 +403,7 @@ for (const [timezoneId, label] of [
           year: 'numeric', month: '2-digit', day: '2-digit',
           hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'short',
         }));
-      await expect(page.locator('section[aria-label="Current prices"] .muted')).toContainText(`Updated ${localTimestamp}`);
+      await expect(page.locator('.economy-content > .toolbar .muted')).toContainText(`Updated ${localTimestamp}`);
       await page.getByRole('button', { name: 'Gem flipping', exact: true }).click();
       await expect(page.locator('.gems .caption')).toHaveCount(0);
       const instant = page.getByRole('combobox', { name: 'Gem price instant', exact: true });

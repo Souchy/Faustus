@@ -15,13 +15,13 @@ use faustus_fetch::{FaustusClient, FetchError as FaustusFetchError};
 use market_core::{
     CurrentExchangePriceLine, CurrentExchangePriceOverview, ExchangeMarketSnapshot,
     ExchangePriceCurrency, GemAnalysisData, GemAnalysisOverview, GemMarketLine, GemMarketOverview,
-    LeagueOption, ServiceStatus,
+    GemSnapshotOption, LeagueOption, ServiceStatus,
 };
 use market_store::{NinjaSnapshot, SqliteStore, StoreError};
 use ninja_fetch::{CurrencyCategory, FetchError as NinjaFetchError, FetchOutcome, NinjaClient};
 use serde::Deserialize;
 use thiserror::Error;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 use tower_http::cors::CorsLayer;
 
 const LEAGUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -31,15 +31,29 @@ const EXCHANGE_PAGES_PER_BATCH: usize = 30;
 const EXCHANGE_PAGE_DELAY: Duration = Duration::from_secs(1);
 const EXCHANGE_BATCH_RETRY_DELAY: Duration = Duration::from_secs(60);
 const SOURCE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const GEM_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const SNAPSHOT_REFRESH_COOLDOWN: Duration = Duration::from_secs(60);
+
+pub mod economy;
 
 #[derive(Clone)]
 pub struct ServiceState {
     store: SqliteStore,
+    economy_store: SqliteStore,
     user_agent: Arc<str>,
     selected_league: watch::Sender<Option<String>>,
     leagues: Arc<RwLock<Option<CachedLeagues>>>,
     exchange_prices: Arc<RwLock<HashMap<(String, String), CachedExchangePrices>>>,
     gem_overviews: Arc<RwLock<HashMap<String, CachedGemOverview>>>,
+    snapshot_captures: Arc<Mutex<HashMap<String, CachedCapture>>>,
+    economy: Arc<economy::EconomyState>,
+}
+
+#[derive(Clone)]
+struct CachedCapture {
+    checked_at: Instant,
+    snapshot: Option<GemSnapshotOption>,
+    data: GemAnalysisData,
 }
 
 #[derive(Clone)]
@@ -51,14 +65,12 @@ struct CachedLeagues {
 #[derive(Clone)]
 struct CachedExchangePrices {
     checked_at: Instant,
-    etag: Option<String>,
     overview: CurrentExchangePriceOverview,
 }
 
 #[derive(Clone)]
 struct CachedGemOverview {
     checked_at: Instant,
-    etag: Option<String>,
     overview: GemMarketOverview,
 }
 
@@ -69,13 +81,21 @@ impl ServiceState {
         selected_league: watch::Sender<Option<String>>,
     ) -> Self {
         Self {
+            economy_store: store.clone(),
             store,
             user_agent: user_agent.into(),
             selected_league,
             leagues: Arc::default(),
             exchange_prices: Arc::default(),
             gem_overviews: Arc::default(),
+            snapshot_captures: Arc::default(),
+            economy: Arc::default(),
         }
+    }
+
+    pub fn with_economy_store(mut self, store: SqliteStore) -> Self {
+        self.economy_store = store;
+        self
     }
 }
 
@@ -100,12 +120,17 @@ pub enum IngestError {
 
 pub fn router(state: ServiceState) -> Router {
     Router::new()
+        .merge(economy::routes())
         .route("/health", get(health))
         .route("/api/v1/leagues", get(leagues))
         .route("/api/v1/selection", axum::routing::post(select_league))
         .route("/api/v1/exchange/prices", get(exchange_prices))
         .route("/api/v1/gems", get(gem_overview))
         .route("/api/v1/gem-analysis", get(gem_analysis))
+        .route(
+            "/api/v1/gem-analysis/refresh",
+            axum::routing::post(refresh_gem_analysis),
+        )
         .route("/api/v1/status", get(status))
         .route("/api/v1/exchange/markets", get(exchange_markets))
         .with_state(state)
@@ -340,6 +365,55 @@ async fn wait_for_selection(
     }
 }
 
+pub async fn run_periodic_gem_collector(
+    state: ServiceState,
+    selected_league: watch::Receiver<Option<String>>,
+) {
+    collect_gem_snapshots(state, selected_league, GEM_SNAPSHOT_INTERVAL).await;
+}
+
+async fn collect_gem_snapshots(
+    state: ServiceState,
+    mut selected_league: watch::Receiver<Option<String>>,
+    interval: Duration,
+) {
+    'selection: loop {
+        let Some(league) = wait_for_selection(&mut selected_league).await else {
+            return;
+        };
+        loop {
+            tokio::select! {
+                result = gem_analysis_inner(state.clone(), GemAnalysisQuery {
+                    league: league.clone(), snapshot: None,
+                }, true) => {
+                    match result {
+                        Ok(Json(overview)) => {
+                            if let Some(error) = &overview.data.gem_error {
+                                eprintln!("Gem snapshot collection for {league}: {error}");
+                            }
+                            if let Some(error) = &overview.data.price_error {
+                                eprintln!("Gem snapshot material collection for {league}: {error}");
+                            }
+                        }
+                        Err(error) => eprintln!("Gem snapshot collection for {league} failed: {error}"),
+                    }
+                }
+                changed = selected_league.changed() => {
+                    if changed.is_err() { return; }
+                    continue 'selection;
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                changed = selected_league.changed() => {
+                    if changed.is_err() { return; }
+                    continue 'selection;
+                }
+            }
+        }
+    }
+}
+
 async fn health() -> StatusCode {
     StatusCode::NO_CONTENT
 }
@@ -464,6 +538,14 @@ async fn exchange_prices(
     State(state): State<ServiceState>,
     Query(query): Query<ExchangePricesQuery>,
 ) -> Result<Json<CurrentExchangePriceOverview>, StatusCode> {
+    load_exchange_prices(state, query, false).await
+}
+
+async fn load_exchange_prices(
+    state: ServiceState,
+    query: ExchangePricesQuery,
+    refresh: bool,
+) -> Result<Json<CurrentExchangePriceOverview>, StatusCode> {
     let category = match query.category.as_str() {
         "Currency" => CurrencyCategory::Currency,
         "Fragment" => CurrencyCategory::Fragment,
@@ -477,38 +559,22 @@ async fn exchange_prices(
     let key = (query.league.clone(), query.category.clone());
     let cached = state.exchange_prices.read().await.get(&key).cloned();
     if let Some(cached) = &cached
+        && !refresh
         && cached.checked_at.elapsed() < EXCHANGE_PRICE_CACHE_TTL
     {
         return Ok(Json(cached.overview.clone()));
     }
 
-    let client = NinjaClient::new(&state.user_agent).map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let outcome = client
-        .fetch_exchange_overview(
-            &query.league,
-            category,
-            cached.as_ref().and_then(|entry| entry.etag.as_deref()),
-        )
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-
-    let entry = match outcome {
-        FetchOutcome::Modified { body, metadata, .. } => CachedExchangePrices {
-            checked_at: Instant::now(),
-            etag: metadata.etag,
-            overview: current_price_overview(&query.league, &query.category, body),
-        },
-        FetchOutcome::NotModified { metadata } => {
-            let Some(mut cached) = cached else {
-                return Err(StatusCode::BAD_GATEWAY);
-            };
-            cached.checked_at = Instant::now();
-            if metadata.etag.is_some() {
-                cached.etag = metadata.etag;
-            }
-            cached
-        }
-    };
+    let _ = category;
+    let raw = economy::raw_overview(&state, &query.league, &query.category, "exchange", refresh)
+        .await.map_err(|error| error.0)?;
+    let body = serde_json::from_value(raw.body).map_err(|error| {
+        eprintln!("Invalid exchange overview: {error}");
+        StatusCode::BAD_GATEWAY
+    })?;
+    let mut overview = current_price_overview(&query.league, &query.category, body);
+    overview.fetched_at = raw.fetched_at;
+    let entry = CachedExchangePrices { checked_at: Instant::now(), overview };
     let overview = entry.overview.clone();
     state.exchange_prices.write().await.insert(key, entry);
     Ok(Json(overview))
@@ -523,6 +589,14 @@ async fn gem_overview(
     State(state): State<ServiceState>,
     Query(query): Query<GemOverviewQuery>,
 ) -> Result<Json<GemMarketOverview>, StatusCode> {
+    load_gem_overview(state, query, false).await
+}
+
+async fn load_gem_overview(
+    state: ServiceState,
+    query: GemOverviewQuery,
+    refresh: bool,
+) -> Result<Json<GemMarketOverview>, StatusCode> {
     let options = leagues(State(state.clone())).await?.0;
     if !options.iter().any(|league| league.id == query.league) {
         return Err(StatusCode::BAD_REQUEST);
@@ -530,37 +604,21 @@ async fn gem_overview(
 
     let cached = state.gem_overviews.read().await.get(&query.league).cloned();
     if let Some(cached) = &cached
+        && !refresh
         && cached.checked_at.elapsed() < GEM_OVERVIEW_CACHE_TTL
     {
         return Ok(Json(cached.overview.clone()));
     }
 
-    let client = NinjaClient::new(&state.user_agent).map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let outcome = client
-        .fetch_skill_gem_overview(
-            &query.league,
-            cached.as_ref().and_then(|entry| entry.etag.as_deref()),
-        )
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-
-    let entry = match outcome {
-        FetchOutcome::Modified { body, metadata, .. } => CachedGemOverview {
-            checked_at: Instant::now(),
-            etag: metadata.etag,
-            overview: gem_market_overview(&query.league, body),
-        },
-        FetchOutcome::NotModified { metadata } => {
-            let Some(mut cached) = cached else {
-                return Err(StatusCode::BAD_GATEWAY);
-            };
-            cached.checked_at = Instant::now();
-            if metadata.etag.is_some() {
-                cached.etag = metadata.etag;
-            }
-            cached
-        }
-    };
+    let raw = economy::raw_overview(&state, &query.league, "SkillGem", "stash", refresh)
+        .await.map_err(|error| error.0)?;
+    let body = serde_json::from_value(raw.body).map_err(|error| {
+        eprintln!("Invalid gem overview: {error}");
+        StatusCode::BAD_GATEWAY
+    })?;
+    let mut overview = gem_market_overview(&query.league, body);
+    overview.fetched_at = raw.fetched_at;
+    let entry = CachedGemOverview { checked_at: Instant::now(), overview };
     let overview = entry.overview.clone();
     state
         .gem_overviews
@@ -580,6 +638,29 @@ async fn gem_analysis(
     State(state): State<ServiceState>,
     Query(query): Query<GemAnalysisQuery>,
 ) -> Result<Json<GemAnalysisOverview>, StatusCode> {
+    gem_analysis_inner(state, query, false).await
+}
+
+async fn refresh_gem_analysis(
+    State(state): State<ServiceState>,
+    Query(query): Query<GemOverviewQuery>,
+) -> Result<Json<GemAnalysisOverview>, StatusCode> {
+    gem_analysis_inner(
+        state,
+        GemAnalysisQuery {
+            league: query.league,
+            snapshot: None,
+        },
+        true,
+    )
+    .await
+}
+
+async fn gem_analysis_inner(
+    state: ServiceState,
+    query: GemAnalysisQuery,
+    refresh: bool,
+) -> Result<Json<GemAnalysisOverview>, StatusCode> {
     let (snapshot, data) = if let Some(id) = query.snapshot {
         if id <= 0 {
             return Err(StatusCode::BAD_REQUEST);
@@ -595,56 +676,77 @@ async fn gem_analysis(
             .ok_or(StatusCode::NOT_FOUND)?;
         (Some(snapshot), data)
     } else {
-        let (gems, prices) = tokio::join!(
-            gem_overview(
-                State(state.clone()),
-                Query(GemOverviewQuery {
-                    league: query.league.clone()
-                }),
-            ),
-            exchange_prices(
-                State(state.clone()),
-                Query(ExchangePricesQuery {
-                    league: query.league.clone(),
-                    category: "Currency".to_owned(),
-                }),
-            ),
-        );
-        let (gems, gem_error) = match gems {
-            Ok(Json(gems)) => (Some(gems), None),
-            Err(error) => (
-                None,
-                Some(format!("Gem prices returned HTTP {}", error.as_u16())),
-            ),
-        };
-        let (prices, price_error) = match prices {
-            Ok(Json(prices)) => (Some(prices), None),
-            Err(error) => (
-                None,
-                Some(format!("Material prices returned HTTP {}", error.as_u16())),
-            ),
-        };
-        let data = GemAnalysisData {
-            gems,
-            gem_error,
-            prices,
-            price_error,
-        };
-        let snapshot = if data.gems.is_some() {
-            Some(
-                state
-                    .store
-                    .record_gem_analysis_snapshot(&query.league, &data, Utc::now())
-                    .await
-                    .map_err(|error| {
-                        eprintln!("Failed to record gem snapshot: {error}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?,
-            )
+        let mut captures = state.snapshot_captures.lock().await;
+        let recent = captures
+            .get(&query.league)
+            .filter(|capture| capture.checked_at.elapsed() < SNAPSHOT_REFRESH_COOLDOWN)
+            .cloned();
+        if refresh && let Some(recent) = recent {
+            (recent.snapshot, recent.data)
         } else {
-            None
-        };
-        (snapshot, data)
+            let (gems, prices) = tokio::join!(
+                load_gem_overview(
+                    state.clone(),
+                    GemOverviewQuery {
+                        league: query.league.clone()
+                    },
+                    refresh,
+                ),
+                load_exchange_prices(
+                    state.clone(),
+                    ExchangePricesQuery {
+                        league: query.league.clone(),
+                        category: "Currency".to_owned(),
+                    },
+                    refresh,
+                ),
+            );
+            let (gems, gem_error) = match gems {
+                Ok(Json(gems)) => (Some(gems), None),
+                Err(error) => (
+                    None,
+                    Some(format!("Gem prices returned HTTP {}", error.as_u16())),
+                ),
+            };
+            let (prices, price_error) = match prices {
+                Ok(Json(prices)) => (Some(prices), None),
+                Err(error) => (
+                    None,
+                    Some(format!("Material prices returned HTTP {}", error.as_u16())),
+                ),
+            };
+            let data = GemAnalysisData {
+                gems,
+                gem_error,
+                prices,
+                price_error,
+            };
+            let snapshot = if data.gems.is_some() {
+                Some(
+                    state
+                        .store
+                        .record_gem_analysis_snapshot(&query.league, &data, Utc::now())
+                        .await
+                        .map_err(|error| {
+                            eprintln!("Failed to record gem snapshot: {error}");
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?,
+                )
+            } else {
+                None
+            };
+            if refresh {
+                captures.insert(
+                    query.league.clone(),
+                    CachedCapture {
+                        checked_at: Instant::now(),
+                        snapshot: snapshot.clone(),
+                        data: data.clone(),
+                    },
+                );
+            }
+            (snapshot, data)
+        }
     };
     let mut snapshots = state
         .store
@@ -802,7 +904,6 @@ mod tests {
         });
         state.gem_overviews.write().await.insert("Standard".to_owned(), CachedGemOverview {
             checked_at: Instant::now(),
-            etag: None,
             overview: gem_market_overview("Standard", serde_json::from_str(
                 r#"{"lines":[{"id":1,"name":"Fireball","chaosValue":2,"gemLevel":1,"gemQuality":0,"count":12,"listingCount":12}]}"#,
             ).unwrap()),
@@ -811,7 +912,6 @@ mod tests {
             ("Standard".to_owned(), "Currency".to_owned()),
             CachedExchangePrices {
                 checked_at: Instant::now(),
-                etag: None,
                 overview: current_price_overview("Standard", "Currency", serde_json::from_str(
                     r#"{"core":{"primary":"chaos","rates":{},"items":[{"id":"chaos","name":"Chaos Orb"}]},
                         "lines":[{"id":"gcp","primaryValue":1}],"items":[{"id":"gcp","name":"Gemcutter's Prism"}]}"#,
@@ -828,6 +928,132 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap()
+    }
+
+    async fn refresh_response(state: &ServiceState) -> GemAnalysisOverview {
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/gem-analysis/refresh?league=Standard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn explicit_refresh_bypasses_feed_ttls_and_coalesces_attempts_including_failures() {
+        let (_directory, mut state) = cached_analysis_state().await;
+        // An invalid user-agent makes any attempted provider access fail without network requests.
+        state.user_agent = "\n".into();
+        let cached = analysis_response(
+            router(state.clone()),
+            "/api/v1/gem-analysis?league=Standard",
+        )
+        .await;
+        assert!(cached.data.gems.is_some());
+        assert!(cached.data.prices.is_some());
+        let (first, concurrent) = tokio::join!(refresh_response(&state), refresh_response(&state));
+        assert!(first.data.gems.is_none());
+        assert!(first.data.prices.is_none());
+        assert!(first.data.gem_error.is_some());
+        assert!(first.data.price_error.is_some());
+        assert!(first.snapshot.is_none());
+        assert_eq!(concurrent.data, first.data);
+        let checked_at = state.snapshot_captures.lock().await["Standard"].checked_at;
+        let repeated = refresh_response(&state).await;
+        assert_eq!(repeated.data, first.data);
+        assert_eq!(
+            state.snapshot_captures.lock().await["Standard"].checked_at,
+            checked_at
+        );
+        state
+            .snapshot_captures
+            .lock()
+            .await
+            .get_mut("Standard")
+            .unwrap()
+            .checked_at = Instant::now() - SNAPSHOT_REFRESH_COOLDOWN;
+        refresh_response(&state).await;
+        assert!(state.snapshot_captures.lock().await["Standard"].checked_at > checked_at);
+        assert_eq!(
+            state
+                .store
+                .gem_analysis_snapshots("Standard")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn collector_waits_for_selection_retries_and_switches_leagues_without_a_client() {
+        assert_eq!(GEM_SNAPSHOT_INTERVAL, Duration::from_secs(900));
+        let (_directory, mut state) = cached_analysis_state().await;
+        state.user_agent = "\n".into();
+        let (selection, receiver) = watch::channel(None);
+        let collector = tokio::spawn(collect_gem_snapshots(
+            state.clone(),
+            receiver,
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(state.snapshot_captures.lock().await.is_empty());
+        selection.send_replace(Some("Standard".to_owned()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state
+                    .snapshot_captures
+                    .lock()
+                    .await
+                    .contains_key("Standard")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let first = state.snapshot_captures.lock().await["Standard"].checked_at;
+        state
+            .snapshot_captures
+            .lock()
+            .await
+            .get_mut("Standard")
+            .unwrap()
+            .checked_at = Instant::now() - SNAPSHOT_REFRESH_COOLDOWN;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.snapshot_captures.lock().await["Standard"].checked_at > first {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        selection.send_replace(Some("Other".to_owned()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.snapshot_captures.lock().await.contains_key("Other") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(selection);
+        tokio::time::timeout(Duration::from_secs(2), collector)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1186,7 +1412,6 @@ mod tests {
             "Standard".to_owned(),
             CachedGemOverview {
                 checked_at: now,
-                etag: Some("gem-etag".to_owned()),
                 overview: GemMarketOverview {
                     league: "Standard".to_owned(),
                     fetched_at: Utc::now(),

@@ -91,6 +91,17 @@ describe('same-instant gem analysis', () => {
     expect(opportunities(gemOverview().gems.filter((gem) => gem.gem_level !== 21), 'corrupt', inputs())).toEqual([]);
   });
 
+  it('exposes listings for each valued outcome, preserving zero and missing counts', () => {
+    const gems = gemOverview().gems.map((gem) => ({
+      ...gem, listing_count: gem.corrupted ? gem.gem_quality : gem.listing_count,
+    }));
+    expect(opportunities(gems, 'corrupt', inputs())[0]?.corruptionOutcomes?.map((outcome) => outcome.listings))
+      .toEqual([20, 23, 20, 0]);
+    const missing = gems.map((gem) => gem.corrupted && gem.gem_quality === 23
+      ? { ...gem, listing_count: null } : gem);
+    expect(opportunities(missing, 'corrupt', inputs())[0]?.corruptionOutcomes?.[1]?.listings).toBeNull();
+  });
+
   it('prefers the requested outcome price and checks confidence on all valued outcomes', () => {
     const gems = [...gemOverview().gems, gem(20, 21, true, '1'), gem(19, 20, true, '1')];
     expect(opportunities(gems, 'corrupt', inputs())[0]?.targetPrice).toBe(87.5);

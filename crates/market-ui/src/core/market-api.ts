@@ -1,6 +1,7 @@
 import type {
   CurrentExchangePriceOverview, ExchangeMarketSnapshot, GemAnalysisOverview, GemMarketOverview,
-  LeagueOption, ServiceStatus,
+  LeagueOption, ServiceStatus, EconomyCategory, EconomyLeague, EconomyOverview, EconomySource,
+  EconomyHistory, EconomyArchive,
 } from './api-types';
 
 export class MarketApi {
@@ -23,7 +24,8 @@ export class MarketApi {
       credentials: 'omit',
     });
     if (!response.ok) {
-      throw new Error(`${path.split('?')[0]} returned HTTP ${response.status}`);
+      const detail = (await response.text()).slice(0, 500);
+      throw new Error(`${path.split('?')[0]} returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
     }
     return response.json() as Promise<T>;
   }
@@ -56,5 +58,43 @@ export class MarketApi {
     const query = new URLSearchParams({ league });
     if (snapshot !== 'latest') query.set('snapshot', snapshot);
     return this.request(`/api/v1/gem-analysis?${query}`, signal);
+  }
+
+  refreshGemAnalysis(league: string, signal: AbortSignal): Promise<GemAnalysisOverview> {
+    return this.request(`/api/v1/gem-analysis/refresh?${new URLSearchParams({ league })}`, signal, {});
+  }
+
+  economyCategories(signal: AbortSignal): Promise<EconomyCategory[]> {
+    return this.request('/api/v1/economy/categories', signal);
+  }
+
+  economyLeagues(signal: AbortSignal): Promise<EconomyLeague[]> {
+    return this.request('/api/v1/economy/leagues', signal);
+  }
+
+  economy(league: string, category: string, source: EconomySource, date: string, signal: AbortSignal,
+    refresh = false): Promise<EconomyOverview> {
+    const query = new URLSearchParams({ league, category, source });
+    if (date) query.set('date', date);
+    return this.request(`/api/v1/economy/${refresh ? 'refresh' : 'overview'}?${query}`, signal, refresh ? {} : undefined);
+  }
+
+  economyDates(league: string, category: string, source: EconomySource, signal: AbortSignal): Promise<string[]> {
+    return this.request(`/api/v1/economy/dates?${new URLSearchParams({ league, category, source })}`, signal);
+  }
+
+  economyHistory(league: string, category: string, source: EconomySource, item: string, days: string,
+    signal: AbortSignal): Promise<EconomyHistory> {
+    const query = new URLSearchParams({ league, category, source, item });
+    if (days) query.set('days', days);
+    return this.request(`/api/v1/economy/history?${query}`, signal);
+  }
+
+  economyArchives(signal: AbortSignal, refresh = false): Promise<EconomyArchive[]> {
+    return this.request(`/api/v1/economy/archives${refresh ? '?refresh=true' : ''}`, signal);
+  }
+
+  importEconomyArchive(name: string, signal: AbortSignal): Promise<EconomyArchive> {
+    return this.request('/api/v1/economy/import', signal, { name });
   }
 }

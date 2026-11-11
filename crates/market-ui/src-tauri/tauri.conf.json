@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8787; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-src 'none'",
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8787; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://web.poecdn.com; object-src 'none'; base-uri 'self'; frame-src 'none'",
       "capabilities": []
     }
   },

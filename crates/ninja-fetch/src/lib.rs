@@ -272,6 +272,17 @@ impl NinjaClient {
         self.fetch_json(url, etag).await
     }
 
+    pub async fn fetch_economy_overview(
+        &self, league: &str, category: &str, source: &str, etag: Option<&str>,
+    ) -> Result<FetchOutcome<serde_json::Value>, FetchError> {
+        let path = if source == "exchange" { "exchange/current/overview" }
+            else if matches!(category, "Currency" | "Fragment") { "stash/current/currency/overview" }
+            else { "stash/current/item/overview" };
+        let mut url = Url::parse(&format!("{API_BASE}/{path}"))?;
+        url.query_pairs_mut().append_pair("league", league).append_pair("type", category);
+        self.fetch_json(url, etag).await
+    }
+
     async fn fetch_json<T: DeserializeOwned>(
         &self,
         url: Url,

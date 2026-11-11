@@ -1,4 +1,5 @@
 *.sqlite3*
+*.import.lock
 
 # Frontend dependencies and generated assets
 node_modules/

@@ -35,10 +35,30 @@ describe('direct HTTP transport', () => {
     expect(fetch).toHaveBeenLastCalledWith('/api/v1/gem-analysis?league=A+%26+B', expect.anything());
     await api.gemAnalysis('A & B', '42', signal);
     expect(fetch).toHaveBeenLastCalledWith('/api/v1/gem-analysis?league=A+%26+B&snapshot=42', expect.anything());
+    await api.refreshGemAnalysis('A & B', signal);
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/gem-analysis/refresh?league=A+%26+B',
+      expect.objectContaining({ method: 'POST', signal, body: '{}' }));
     await api.selectLeague('A & B', signal);
     expect(fetch).toHaveBeenLastCalledWith('/api/v1/selection', expect.objectContaining({
       method: 'POST', body: '{"id":"A & B"}', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     }));
+  });
+
+  it('encodes economy contexts, exact variants, history and import names', async () => {
+    const fetch = vi.fn(async () => Response.json([]));
+    vi.stubGlobal('fetch', fetch);
+    const api = new MarketApi('');
+    const signal = new AbortController().signal;
+    await api.economy('A & B', 'SkillGem', 'stash', '2026-07-16', signal);
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/economy/overview?league=A+%26+B&category=SkillGem&source=stash&date=2026-07-16', expect.anything());
+    await api.economy('A & B', 'Currency', 'exchange', '', signal, true);
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/economy/refresh?league=A+%26+B&category=Currency&source=exchange',
+      expect.objectContaining({ method: 'POST', body: '{}' }));
+    await api.economyHistory('Standard', 'SkillGem', 'stash', '21/20 c', '7', signal);
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/economy/history?league=Standard&category=SkillGem&source=stash&item=21%2F20+c&days=7', expect.anything());
+    await api.importEconomyArchive('Phrecia 2.0', signal);
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/economy/import',
+      expect.objectContaining({ method: 'POST', body: '{"name":"Phrecia 2.0"}' }));
   });
 
   it('surfaces HTTP, network and JSON errors', async () => {

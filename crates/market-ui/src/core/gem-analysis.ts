@@ -72,6 +72,7 @@ export interface CorruptionOutcome {
   price: number;
   contribution: number;
   variant: string;
+  listings: number | null;
   estimated: boolean;
 }
 
@@ -146,6 +147,7 @@ export function opportunities(
         corruptionOutcomes.push({
           label: bucket.label, probability: bucket.probability, price,
           contribution: bucket.probability * price, variant: variantLabel(selected),
+          listings: selected.listing_count ?? null,
           estimated: !preferred,
         });
       }

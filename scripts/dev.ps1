@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [switch]$Web,
-    [switch]$Deprecated
+    [switch]$Deprecated,
+    [string]$Database = $env:FAUSTUS_DATABASE,
+    [string]$EconomyDatabase = $env:FAUSTUS_ECONOMY_DATABASE
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +16,15 @@ $stderrLog = Join-Path $logDirectory "market-service.stderr.log"
 $userAgent = "Faustus/0.1.0"
 $quotedUserAgent = '"' + $userAgent + '"'
 $serviceArguments = "serve --user-agent $quotedUserAgent"
+if (-not $Database) {
+    $Database = [Environment]::GetEnvironmentVariable("FAUSTUS_DATABASE", "User")
+}
+if ($Database) {
+    $serviceArguments += ' --database "' + $Database + '"'
+}
+if ($EconomyDatabase) {
+    $serviceArguments += ' --economy-database "' + $EconomyDatabase + '"'
+}
 
 if ($Web -and $Deprecated) {
     throw "Choose either -Web or -Deprecated, not both."

@@ -12,6 +12,8 @@ use thiserror::Error;
 
 const EXCHANGE_PROVIDER_KEY: &str = "ggg_exchange";
 
+mod economy;
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("SQLite operation failed: {0}")]
@@ -45,12 +47,24 @@ pub struct CacheValidators {
 
 impl SqliteStore {
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let options = SqliteConnectOptions::new()
+        Self::connect_options(path, false).await
+    }
+
+    pub async fn connect_economy(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::connect_options(path, true).await
+    }
+
+    async fn connect_options(path: impl AsRef<Path>, economy: bool) -> Result<Self, StoreError> {
+        let mut options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .foreign_keys(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(Duration::from_secs(5));
+        if economy {
+            options = options.synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+                .pragma("cache_size", "-32768");
+        }
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
@@ -394,6 +408,15 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
             2_i64,
             include_str!("../migrations/0002_gem_analysis_snapshots.sql"),
         ),
+        (3_i64, include_str!("../migrations/0003_economy.sql")),
+        (
+            4_i64,
+            include_str!("../migrations/0004_economy_categories.sql"),
+        ),
+        (
+            5_i64,
+            include_str!("../migrations/0005_economy_dates_covering.sql"),
+        ),
     ] {
         let applied: Option<i64> =
             sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = ?")
@@ -625,6 +648,32 @@ mod tests {
             .unwrap();
         assert_eq!(metadata, first);
         assert_eq!(saved, analysis("2"));
+    }
+
+    #[tokio::test]
+    async fn backfills_category_catalog_without_changing_existing_observations() {
+        let (_directory, store) = store().await;
+        sqlx::query("INSERT INTO economy_observations VALUES ('Standard','Currency','exchange','chaos','2026-01-01','snapshot','1','Chaos Orb',NULL)")
+            .execute(&store.pool).await.unwrap();
+        sqlx::query("DROP TABLE economy_categories")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version=4")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        migrate(&store.pool).await.unwrap();
+        assert_eq!(
+            store.stored_economy_categories().await.unwrap(),
+            vec!["Currency"]
+        );
+        migrate(&store.pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM economy_observations")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]

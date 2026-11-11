@@ -63,7 +63,6 @@
   <p if.bind="confidenceError" id="confidence-help" class="error" role="alert">${confidenceError}</p>
   <p if.bind="materialPriceError" id="material-price-help" class="error" role="alert">${materialPriceError}</p>
   <p if.bind="gemPriceError" class="error" role="alert">${gemPriceError}</p>
-  <p if.bind="strategy === 'corrupt'" class="muted">EV = expected value. Approximate returns; hover or focus EV / Net / ROI for the weighted breakdown.</p>
   <div class="table-scroll gem-table" ref="tableScroll">
     <table>
       <thead><tr>
@@ -83,20 +82,21 @@
               <span class="metric-value">${metric === 'roiPercent' ? row.roiPercent.toFixed(1) + '%' : money(row[metric])}</span>
               <div if.bind="row.corruptionOutcomes" class="return-breakdown" role="tooltip">
                 <table aria-label="Expected value breakdown">
-                  <thead><tr><th>Outcome</th><th>Valued variant</th><th>Chance</th><th>Resale</th><th>Chance x resale</th></tr></thead>
+                  <thead><tr><th>Outcome</th><th>Valued variant</th><th>Listings</th><th>Chance</th><th>Resale</th><th>Chance x resale</th></tr></thead>
                   <tbody>
                     <tr repeat.for="outcome of row.corruptionOutcomes">
                       <td>${outcome.label}</td>
                       <td>${outcome.variant}<small if.bind="outcome.estimated">Estimate: lowest listed in bucket</small></td>
+                      <td>${outcome.listings === null ? 'N/A' : outcome.listings}</td>
                       <td>${(outcome.probability * 100).toFixed(1)}%</td>
                       <td>${money(outcome.price)}</td><td>${money(outcome.contribution)}</td>
                     </tr>
                   </tbody>
                   <tfoot>
-                    <tr><th colspan="2">EV (sum)</th><td>100.0%</td><td></td><td>${money(row.targetPrice)}</td></tr>
-                    <tr><th colspan="2">Cost (buy + Vaal)</th><td colspan="2">${money(row.sourcePrice)} + ${money(row.materialCost)}</td><td>${money(row.sourcePrice + row.materialCost)}</td></tr>
-                    <tr><th colspan="2">Net (EV - cost)</th><td colspan="2">${money(row.targetPrice)} - ${money(row.sourcePrice + row.materialCost)}</td><td>${money(row.profit)}</td></tr>
-                    <tr><th colspan="2">ROI (Net / cost)</th><td colspan="2">${money(row.profit)} / ${money(row.sourcePrice + row.materialCost)} x 100</td><td>${row.roiPercent.toFixed(1)}%</td></tr>
+                    <tr><th colspan="3">EV (sum)</th><td>100.0%</td><td></td><td>${money(row.targetPrice)}</td></tr>
+                    <tr><th colspan="3">Cost (buy + Vaal)</th><td colspan="2">${money(row.sourcePrice)} + ${money(row.materialCost)}</td><td>${money(row.sourcePrice + row.materialCost)}</td></tr>
+                    <tr><th colspan="3">Net (EV - cost)</th><td colspan="2">${money(row.targetPrice)} - ${money(row.sourcePrice + row.materialCost)}</td><td>${money(row.profit)}</td></tr>
+                    <tr><th colspan="3">ROI (Net / cost)</th><td colspan="2">${money(row.profit)} / ${money(row.sourcePrice + row.materialCost)} x 100</td><td>${row.roiPercent.toFixed(1)}%</td></tr>
                   </tfoot>
                 </table>
                 <p>Approximate four-bucket model: 21-22% quality grouped with +3 quality; Vaal conversion treated as unchanged. -1 level is releveled to max; leveling time excluded.</p>

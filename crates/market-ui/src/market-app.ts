@@ -1,6 +1,6 @@
 import { resolve } from 'aurelia';
 import type {
-  CurrentExchangePriceOverview, ExchangeMarketSnapshot, GemAnalysisOverview, GemMarketOverview,
+  CurrentExchangePriceOverview, GemAnalysisOverview, GemMarketOverview,
   GemSnapshotOption, LeagueOption,
 } from './core/api-types';
 import {
@@ -9,7 +9,7 @@ import {
 } from './core/gem-analysis';
 import { MarketApi } from './core/market-api';
 
-type Page = 'prices' | 'gems' | 'history';
+type Page = 'prices' | 'gems';
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -28,7 +28,7 @@ export class MarketApp {
   error = '';
   priceError = '';
   gemError = '';
-  historyError = '';
+  economyRefreshToken = 0;
   prices: CurrentExchangePriceOverview | null = null;
   gems: GemMarketOverview | null = null;
   gemPrices: CurrentExchangePriceOverview | null = null;
@@ -37,7 +37,6 @@ export class MarketApp {
   selectedGemSnapshot = 'latest';
   latestGemFetchedAt: string | undefined;
   gemLoading = false;
-  markets: ExchangeMarketSnapshot[] = [];
   strategies = strategies;
   strategy: GemStrategy = 'level';
   search = '';
@@ -148,7 +147,12 @@ export class MarketApp {
     return 'No matching variants with sufficient confidence and listed prices were found for this strategy.';
   }
 
-  async loadDashboard(preferredLeague = this.selectedLeagueId): Promise<void> {
+  async refresh(): Promise<void> {
+    await this.loadDashboard(this.selectedLeagueId, true);
+    this.economyRefreshToken++;
+  }
+
+  async loadDashboard(preferredLeague = this.selectedLeagueId, refresh = false): Promise<void> {
     this.request?.abort();
     this.gemRequest?.abort();
     this.gemRequest = null;
@@ -157,12 +161,11 @@ export class MarketApp {
     this.request = request;
     const timeout = setTimeout(() => request.abort(new Error('Market service request timed out.')), 60_000);
     this.loading = true;
-    this.error = this.priceError = this.gemError = this.gemPriceError = this.historyError = '';
+    this.error = this.priceError = this.gemError = this.gemPriceError = '';
     this.prices = null;
     this.gems = null;
     this.gemPrices = null;
     this.latestGemFetchedAt = undefined;
-    this.markets = [];
     this.updateRows();
     try {
       const [leagues, status] = await Promise.all([
@@ -187,13 +190,11 @@ export class MarketApp {
         await this.api.selectLeague(this.selectedLeagueId, request.signal);
       }
       if (this.request !== request) return;
-      const [markets, analysis] = await Promise.allSettled([
-        this.api.markets(this.selectedLeagueId, request.signal),
-        this.api.gemAnalysis(this.selectedLeagueId, 'latest', request.signal),
+      const [analysis] = await Promise.allSettled([
+        refresh ? this.api.refreshGemAnalysis(this.selectedLeagueId, request.signal)
+          : this.api.gemAnalysis(this.selectedLeagueId, 'latest', request.signal),
       ]);
       if (this.request !== request) return;
-      if (markets.status === 'fulfilled') this.markets = markets.value;
-      else this.historyError = message(markets.reason);
       if (analysis.status === 'fulfilled') {
         this.latestGemFetchedAt = analysis.value.data.gems?.fetched_at;
         this.prices = analysis.value.data.prices;
@@ -376,7 +377,7 @@ export class MarketApp {
       'The -1 level outcome is releveled to max; leveling time excluded.',
       ...row.corruptionOutcomes.map((outcome) =>
         `${(outcome.probability * 100).toFixed(1)}% x ${this.money(outcome.price)} = ${this.money(outcome.contribution)}: ${outcome.label}`
-        + ` (${outcome.variant}${outcome.estimated ? '; estimated: lowest listed price in bucket' : ''})`),
+        + ` (${outcome.variant}; listings: ${outcome.listings ?? 'unavailable'}${outcome.estimated ? '; estimated: lowest listed price in bucket' : ''})`),
       `EV (expected value) = ${this.money(row.targetPrice)}`,
       `Cost = ${this.money(row.sourcePrice)} buy + ${this.money(row.materialCost)} Vaal = ${this.money(totalCost)}`,
       `Expected Net = ${this.money(row.targetPrice)} - ${this.money(totalCost)} = ${this.money(row.profit)}`,

@@ -1,6 +1,6 @@
 # Faustus
 
-Faustus records and inspects Path of Exile market data. The Rust workspace contains GGG exchange ingestion, poe.ninja currency/fragment snapshots, SQLite storage, and a market service. The Aurelia v2/TypeScript frontend runs in a browser or a Tauri v2 desktop shell. The previous GPUI implementation is preserved in `crates/market-ui-deprecated`.
+Faustus records and inspects Path of Exile economy data. The Rust workspace contains poe.ninja economy collection, historical dump imports, SQLite storage, and a market service. The Aurelia v2/TypeScript frontend runs in a browser or a Tauri v2 desktop shell. The previous GPUI implementation and legacy GGG integration are preserved in `crates/market-ui-deprecated` and the Rust crates, but normal service operation no longer collects GGG exchange history.
 
 ## Run Locally
 
@@ -36,7 +36,7 @@ To trigger a single collection manually instead:
 cargo run -p market-service -- ingest-once --league "LEAGUE_ID"
 ```
 
-Each `ingest-once` run uses the same provider clients and cache validators as the scheduled collector.
+Each `ingest-once` run collects supported poe.ninja economy categories, using the same provider cache and validators as the scheduled collector. It does not collect GGG exchange pages.
 
 When running the backend separately, launch the desktop frontend in another terminal:
 
@@ -47,13 +47,56 @@ npm run tauri -- dev
 
 Use `npm run dev` instead for the browser frontend. Vite proxies `/api` and `/health` to `http://127.0.0.1:8787`; both clients use ordinary HTTP `fetch`, not Tauri commands or an HTTP plugin. The packaged desktop app also requires an independently running market service; it does not start, bundle, or stop one.
 
-The Current prices tab shows poe.ninja's current exchange estimates for the selected league, quoted in the overview's primary currency (Chaos for Standard), with volume, the dominant paired currency, trend, and fetch time. These are aggregate estimates, not executable buy/sell orders. The GGG history tab shows recorded pair snapshots and raw ratios separately.
+The **Current prices** tab is an economy workspace with grouped General, Equipment & Gems, Atlas, and Crafting navigation. It covers the supported PoE 1 economy categories, with Exchange/Stash source switching where the public API supports both. Search is category-local and independent of Gem flipping. Tables support sorting, 100-row batches, native/Chaos/Divine quotes, variant details, recent trend charts, and category-specific filters for item type, gem level/quality, links, corruption, map tier, and listing counts where supplied. Empty, failed, and unsupported source combinations are explicit. Prices are aggregate estimates, not executable buy/sell orders.
+
+Click an item to see its available properties/modifiers and local price history. Charts retain native units, separate daily dumps from timestamped observations, and break at missing intervals rather than inventing prices. A history data table provides the same observations without relying on the chart. Range filters are relative to that item's newest saved observation, so they also work for old leagues. Historical quotes use same-day currency rates when available, never today's rates; unavailable conversions display a dash. The **Dataset** and **As of** selectors browse saved prices without switching the live collector or the Gem flipping league. A league can have both live feeds and imported history.
+
+The GGG history tab and active frontend market queries have been removed. Existing GGG database records, legacy read endpoints, and deprecated app code are retained.
+
+### Historical economy dumps
+
+Open **Historical data** in Current prices to discover published [poe.ninja economy dumps](https://poe.ninja/poe1/data), import or retry individual archives, see import counts/date coverage/errors, and browse completed leagues. **Discover dumps** checks for newly published archives, including Allflame once it appears; unpublished archives are not guessed or downloaded automatically.
+
+Imports include only the named softcore challenge league. Hardcore, Ruthless, and permanent-league CSVs in the same ZIP are not imported. The initial selection is **Ancestors, Mirage, Phrecia 2.0, Keepers, and Mercenaries**. Imports are explicit, bounded, and idempotent. Incomplete jobs are hidden from historical queries and can be retried after failure/restart; a retry of the same checksum reuses existing observations without duplication. The importer streams semicolon-separated CSVs and preserves item IDs, base types, variants and link groups rather than joining prices by name. Archive IDs remain separate from live provider IDs when a reliable variant match is unavailable.
+
+Per-archive OS locks beside the economy database prevent overlapping CLI/service imports. Locks are released automatically when a process exits; service restart recovery does not mark a still-running CLI job as failed.
+
+CLI equivalents:
+
+```powershell
+cargo run -p market-service -- import --name "Ancestors"
+cargo run -p market-service -- import --name "Ancestors" --file "C:\data\Ancestors.zip"
+# Explicitly replace a completed archive when reprocessing it is needed:
+cargo run -p market-service -- import --name "Ancestors" --replace
+```
+
+Use one database for live economy updates, historical dumps, and saved Gem flipping snapshots. `--database` selects it for every command; `FAUSTUS_DATABASE` provides a shared environment default. Without either, the default is `faustus.sqlite3` in the working directory.
+
+```powershell
+cargo run -p market-service -- --database "D:\Faustus\faustus.sqlite3" serve
+cargo run -p market-service -- --database "D:\Faustus\faustus.sqlite3" import --name "Mirage"
+.\scripts\dev.ps1 -Web -Database "D:\Faustus\faustus.sqlite3"
+# Optional persistent default for new terminal sessions:
+[Environment]::SetEnvironmentVariable("FAUSTUS_DATABASE", "D:\Faustus\faustus.sqlite3", "User")
+```
+
+The development launcher reads `FAUSTUS_DATABASE` from the process environment or the Windows user setting, so an already-open editor can use the persisted default too. Explicit `-Database` / `--database` arguments override that default. CLI commands launched from an existing terminal need `$env:FAUSTUS_DATABASE` set in that terminal or a new terminal session.
+
+The optional `--economy-database` / launcher `-EconomyDatabase` (`FAUSTUS_ECONOMY_DATABASE`) override remains available for deliberately split deployments, but is unnecessary for the single-database setup. A separate economy store uses SQLite WAL with NORMAL synchronous mode and bounded per-connection caches for bulk imports: it remains crash-consistent, but an OS/power failure can lose the newest uncheckpointed observations, which can be recollected or reimported. A unified store uses the main database's unchanged durability settings. Allow space for the database, WAL, archive downloads, SQLite temporary files, and build artifacts. Parent directories for a custom database must already exist.
+
+An upgrade of an already populated economy store may rebuild indexes on its first startup. Start the service separately and wait for its listening message before opening the client; do not interrupt that migration. Later starts reuse the persisted indexes and category catalog.
+
+Published dumps provide daily stash estimates, not 15-minute backfill, exchange volume, or listing/sample counts. Only Chaos-quoted currency rows are imported; differently directed quotes are explicitly counted as exclusions, not silently inverted or merged. Unknown historical categories remain browsable under Historical. Original link ranges such as `1-4 links` are kept as ranges, not treated as an exact four-link price. Dumps do not become Gem flipping snapshots: their confidence/variant coverage cannot reconstruct a complete same-instant gem/material bundle.
+
+**Attribution:** historical data is provided by poe.ninja under the **CC BY-SA** license stated on its [data page](https://poe.ninja/poe1/data). Import records retain source URLs, checksums, license attribution, coverage, counts and exclusions. Retain the source attribution and applicable share-alike terms when redistributing imported data. Faustus's own source-code license is unchanged.
 
 The Gem flipping page compares poe.ninja SkillGem variants by level, quality, and corruption. Its shared search filters all three strategies, and clicking a gem row carries that gem into the search when switching strategies. The **As of** selector defaults to **Latest**, followed by locally saved instants, newest first. Buy, sell, confidence counts, and automatic material prices all come from the selected snapshot, not different sparkline endpoints; manual material overrides are optional. Each snapshot preserves the latest known gem and currency overviews together, including their separate fetch times; the feeds are not necessarily updated simultaneously. The Current prices tab always uses current data, even when viewing a saved gem instant. Changing leagues resets the instant to Latest; refreshing the same league preserves a pinned instant.
 
 The strategies estimate level-1-to-max flips, 20% quality upgrades using 20 Gemcutter's Prisms, and approximate expected Vaal corruption returns. Facetor's Lens is an optional, manually entered Chaos cost in Level Flip, including when viewing a saved instant. Its price defaults to 50 Chaos, with one Lens per flip and no quantity control. **Min** in the compact confidence controls configures the sample/listing threshold (default 10, a positive whole number): buy and all valued sell variants must have at least that many samples and listings. Missing counts are low confidence. Low-confidence gems are excluded by default; **Low conf** includes them with a LOW CONF badge. Invalid thresholds show an error instead of silently using another value. Lens XP varies and is not included in the gem feed. Estimates exclude trade fees, leveling time, and market slippage.
 
 **Vaal corrupt** uses an explicitly simplified four-bucket model on a max-level, 20%-quality uncorrupted gem: +1 level (12.5%), +3 quality (12.5%), max-level Q20 corrupted (62.5%), and max-level Q0-19 corrupted (12.5%). The -1 level outcome is valued after releveling to max. This approximation groups 21-22% quality with +3 quality and treats Vaal conversion as unchanged; it is not an exact mechanics simulation, including for special gems. +1 level and unchanged use their exact corrupted variants. +3 quality prefers Q23, falling back to the lowest listed Q21-23 price; reduced quality uses the lowest listed Q0-19 price. Bucket estimates are flagged in the breakdown. An entirely unpriced bucket excludes the gem; uncorrupted prices and zero valuations are never substituted. The Sell column becomes **EV** (expected value) on this tab: the probability-weighted resale value. Net subtracts the buy price and one Vaal Orb; ROI divides Net by that total cost. Hover or focus EV, Net, or ROI for a table of outcome probabilities, resale valuations, weighted contributions, and summed EV, followed by cost, Net, and ROI formulas and the model assumptions. Other strategies retain the Sell label. Listings shows buy listings / minimum listings across the valued outcomes, with confidence checked on every valued variant.
+
+The breakdown table includes the listing count for each outcome's valued variant, including estimated bucket representatives; missing counts display N/A rather than zero. EV, Net, and ROI expose these details on hover or focus without a separate explanatory label above the table.
 
 The Vaal tab also includes a sortable **Max value** column: the highest resale valuation among the modeled outcomes, before costs and without probability weighting.
 
@@ -65,9 +108,18 @@ The service also exposes:
 - `GET /api/v1/leagues` (cached poe.ninja economy league options)
 - `POST /api/v1/selection` with `{"id":"<league-id>"}`
 - `GET /api/v1/status`
+- `GET /api/v1/economy/categories` (supported live categories plus imported historical-only categories)
+- `GET /api/v1/economy/leagues` (live leagues and imported league availability)
+- `GET /api/v1/economy/overview?league=LEAGUE_ID&category=Currency&source=exchange` (or `source=stash`, optionally `date=YYYY-MM-DD`)
+- `POST /api/v1/economy/refresh?league=LEAGUE_ID&category=Currency&source=exchange` (provider-cache-aware revalidation)
+- `GET /api/v1/economy/dates?league=LEAGUE_ID&category=Currency&source=stash`
+- `GET /api/v1/economy/history?league=LEAGUE_ID&category=SkillGem&source=stash&item=ITEM_ID` (optionally `days=7`, `30`, etc.; up to 20,000 newest observations)
+- `GET /api/v1/economy/archives` (cached published catalog and persisted import status; `refresh=true` rediscovers availability)
+- `POST /api/v1/economy/import` with `{"name":"Ancestors"}` (queues an explicit softcore-only import)
 - `GET /api/v1/exchange/prices?league=LEAGUE_ID&type=Currency` (also supports `Fragment`; responses are cached for 15 minutes and revalidated with ETags)
 - `GET /api/v1/gems?league=LEAGUE_ID` (poe.ninja SkillGem variants, prices, listing counts, and sparkline history; cached for five minutes)
 - `GET /api/v1/gem-analysis?league=LEAGUE_ID` (latest gem/material data, explicit independent provider errors, and saved snapshot options; records a snapshot when gem data is available)
+- `POST /api/v1/gem-analysis/refresh?league=LEAGUE_ID` (revalidates both feeds with ETags and saves the resulting bundle; concurrent/repeated requests for a league reuse the last refresh attempt for one minute, including explicit provider errors)
 - `GET /api/v1/gem-analysis?league=LEAGUE_ID&snapshot=SNAPSHOT_ID` (immutable saved gem/material data for that league; database-only, without contacting providers; missing or cross-league IDs return 404)
 - `GET /api/v1/exchange/markets?league=LEAGUE_NAME&limit=100`
 
@@ -111,17 +163,21 @@ All UI dates use Canadian English (`en-CA`) formatting and the browser's local t
 The Aurelia application registers `MarketApi` as a container-scoped singleton. `MarketApp` obtains it with `resolve(MarketApi)`; tests can override that registration and construct the app through a DI container.
 
 Frontend source organization:
-- `src/pages/current-prices/`, `src/pages/gem-flipping/`, and `src/pages/ggg-history/` contain the individual Aurelia page templates.
+- `src/pages/current-prices/` contains the economy workspace, item details, charts and data-manager UI; `src/pages/gem-flipping/` contains the gem page template. The old GGG template is no longer imported.
 - `src/core/` contains the HTTP client, API types, gem-analysis calculations, and their unit tests.
-- `src/` retains the entry point, environment declarations, app shell/shared dashboard state, app tests, and shared styles. Page components receive that state through an explicit `model` binding, keeping filters and selections intact when switching pages.
+- `src/` retains the entry point, environment declarations, app shell/shared dashboard state, app tests, and shared styles. Gem flipping receives shared state through a `model` binding; the economy component owns separate filters/history state and receives the live league and refresh token. Switching tabs preserves economy context.
 
 ## Data Collection Notes
 
-GGG's documented exchange endpoint is a historical cursor feed. A request without a cursor starts at the oldest retained history, not at the current hour. The collector advances sequentially through at most 30 pages per batch, waits one second between page requests and one minute between incomplete batches, then polls hourly once caught up. It honors `Retry-After` after rate limits and does not issue undocumented cursor jumps. Current-hour exchange data and individual transactions are not exposed by this feed; a new database can take time to reach current-league rows.
+Normal service operation no longer starts the GGG historical cursor collector. Its old records and implementation remain available for deprecated integrations, without deleting or rewriting their data.
 
-poe.ninja's documented economy API provides Currency and Fragment stash overviews for stored snapshots, plus current exchange overviews for the prices tab. Current exchange responses are held in a per-league/category 15-minute service cache and revalidated with ETags. Requests go through the service, not directly from the frontend.
+poe.ninja's [supported economy API](https://poe.ninja/docs/api) supplies category overviews, not a supported full item-detail history API. The service records applicable categories for the selected live league on a 15-minute cycle with staggered requests. Provider responses are shared by economy and gem/material consumers, cached by league/category/source and conditionally revalidated with ETags. Manual refresh respects provider cache lifetimes; 304 responses retain original source timestamps instead of manufacturing new observations. Economy API requests go through the backend, not from end-user browsers. Item images load directly from `https://web.poecdn.com`; the desktop CSP permits that image origin only, without expanding script or API access. Send an appropriate descriptive User-Agent using `--user-agent`.
 
-Gem-analysis snapshots are recorded in SQLite when the dashboard loads, refreshes, or requests Latest; there is no additional background polling or historical backfill. Identical cached gem/material bundles reuse their existing snapshot. The selector lists the 200 most recent saved instants (plus a pinned older instant, if needed); older records remain stored. Snapshots survive service restarts. Previously collected Currency/Fragment stash history cannot reconstruct historical gem variants. The [documented poe.ninja API](https://poe.ninja/docs/api) only exposes current overviews, and its league list supplies no league-start timestamps, so saved instants use actual capture timestamps displayed in local time rather than invented Hour/Day/Week labels. If material prices failed at capture time, that failure is preserved and material-dependent strategies stay unavailable unless a manual material price is entered; current material prices are never substituted automatically. The service must be restarted after updating to install the new snapshot-table migration and HTTP endpoint.
+Gem-analysis snapshots are recorded in SQLite when the dashboard loads or requests Latest. An independent server collector also revalidates the selected league's gem and material feeds immediately after league selection and every 15 minutes thereafter, without needing an open client or waiting for the GGG exchange backlog. Collection switches with the selected league and continues while the service runs; after a service restart it waits for a client to select a league. Failures are logged and retried on the next interval. There is no historical backfill.
+
+The client's **Refresh** button requests cache-aware revalidation; a shared provider response stays cached until its cache lifetime allows another conditional request. Gem snapshot capture also has a one-minute per-league cooldown, including failed attempts, and serializes captures to prevent duplicate refreshes. ETags are retained; an unchanged provider response keeps its original source timestamp and identical bundles reuse their existing snapshot rather than manufacturing a new instant. A pinned historical instant stays selected on Refresh, while Current prices and the latest snapshot are updated separately.
+
+The selector lists the 200 most recent saved instants (plus a pinned older instant, if needed); older records remain stored. Snapshots survive service restarts. Previously collected Currency/Fragment stash history cannot reconstruct historical gem variants. The [documented poe.ninja API](https://poe.ninja/docs/api) only exposes current overviews, and its league list supplies no league-start timestamps, so saved instants use actual capture timestamps displayed in local time rather than invented Hour/Day/Week labels. If material prices failed at capture time, that failure is preserved and material-dependent strategies stay unavailable unless a manual material price is entered; current material prices are never substituted automatically. Restart the market service after updating to enable periodic gem collection and the explicit refresh endpoint.
 
 Only the deprecated GPUI WASM frontend needs nightly because GPUI Kit's web backend enables `wasm_thread`. The Aurelia web frontend uses the standard Vite build and does not compile Rust to WebAssembly.
 
@@ -134,8 +190,8 @@ This product isn't affiliated with or endorsed by Grinding Gear Games in any way
 - `market-core`: shared identifiers, exact decimal quotes, comparisons, and API types.
 - `faustus-fetch`: GGG cursor-page client and raw response preservation.
 - `ninja-fetch`: documented economy client, ETag handling, and overview DTOs.
-- `market-store`: SQLite migrations, transactional cursor recording, and snapshot queries.
-- `market-service`: one-shot ingestion CLI and local read-only HTTP API.
+- `market-store`: SQLite migrations, transactional cursor recording, economy/import history, and gem snapshots.
+- `market-service`: local economy HTTP API, scheduled collectors, and ingestion/import CLI.
 - `market-ui`: Aurelia v2/Vite frontend in `src`, with the Tauri v2 Rust desktop shell in `src-tauri`.
 - `market-ui-deprecated`: preserved GPUI desktop and single-threaded WebAssembly frontends; major pages live under `src/pages/`.
 

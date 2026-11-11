@@ -20,7 +20,7 @@ function mockService(options: { priceFailure?: boolean; selected?: string | null
     if (url.pathname.endsWith('/markets')) return Response.json([]);
     if (url.pathname.endsWith('/prices')) return options.priceFailure ? new Response('', { status: 502 }) : Response.json(prices());
     if (url.pathname.endsWith('/gems')) return Response.json(options.categorized ? categorizedGemOverview() : gemOverview());
-    if (url.pathname.endsWith('/gem-analysis')) {
+    if (url.pathname.endsWith('/gem-analysis') || url.pathname.endsWith('/gem-analysis/refresh')) {
       const analysis = gemAnalysis(options.categorized ? categorizedGemOverview() : gemOverview(), url.searchParams.get('snapshot') === '1');
       if (options.priceFailure) {
         analysis.data.prices = null;
@@ -35,6 +35,20 @@ function mockService(options: { priceFailure?: boolean; selected?: string | null
 }
 
 describe('dashboard state', () => {
+  it('explicitly refreshes the latest snapshot without replacing a pinned historical instant', async () => {
+    const fetch = mockService();
+    const app = createApp();
+    await app.loadDashboard();
+    expect(fetch.mock.calls.some(([input]) => input.includes('/gem-analysis/refresh'))).toBe(false);
+    await app.selectGemSnapshot('1');
+    await app.refresh();
+    expect(fetch).toHaveBeenCalledWith('/api/v1/gem-analysis/refresh?league=Standard',
+      expect.objectContaining({ method: 'POST' }));
+    expect(app.selectedGemSnapshot).toBe('1');
+    expect(app.gems?.fetched_at).toBe('2026-11-08T12:00:00Z');
+    expect(app.latestGemFetchedAt).toBe('2026-11-09T12:00:00Z');
+  });
+
   it('uses editable material prices for the relevant strategies and restores automatic snapshot prices', async () => {
     mockService();
     const app = createApp();

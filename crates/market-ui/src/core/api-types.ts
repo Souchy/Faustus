@@ -90,3 +90,78 @@ export interface GemAnalysisOverview {
   data: GemAnalysisData;
   snapshots: GemSnapshotOption[];
 }
+
+export type EconomySource = 'exchange' | 'stash';
+
+export interface EconomyCategory {
+  id: string;
+  name: string;
+  group: string;
+  sources: EconomySource[];
+}
+
+export interface EconomyLeague extends LeagueOption {
+  live: boolean;
+  archived?: boolean;
+}
+
+export interface EconomyLine {
+  id: string;
+  name: string;
+  icon: string | null;
+  details_id: string | null;
+  price: string | null;
+  divine_price: string | null;
+  change: string | null;
+  sparkline: (string | null)[];
+  volume: string | null;
+  pair: string | null;
+  pair_rate: string | null;
+  listings: number | null;
+  samples: number | null;
+  variant: string | null;
+  base_type: string | null;
+  item_type: string | null;
+  links: number | null;
+  gem_level: number | null;
+  gem_quality: number | null;
+  corrupted: boolean | null;
+  map_tier: number | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface EconomyOverview {
+  league: string;
+  category: string;
+  source: EconomySource;
+  fetched_at: string;
+  quote_currency: string;
+  rates: Record<string, string>;
+  lines: EconomyLine[];
+}
+
+export interface EconomyHistoryPoint {
+  date: string;
+  price: string;
+  currency: string;
+  granularity: 'daily' | 'snapshot';
+}
+
+export interface EconomyHistory {
+  points: EconomyHistoryPoint[];
+  coverage: { start: string | null; end: string | null };
+}
+
+export interface EconomyArchive {
+  name: string;
+  status: 'available' | 'queued' | 'downloading' | 'importing' | 'completed' | 'failed';
+  rows: number;
+  skipped: number;
+  error: string | null;
+  start: string | null;
+  end: string | null;
+  league: string | null;
+  progress: string;
+  license: string;
+  url: string;
+}
