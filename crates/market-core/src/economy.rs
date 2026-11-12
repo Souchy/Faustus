@@ -156,6 +156,8 @@ pub struct Point {
     pub price: String,
     pub currency: String,
     pub granularity: String,
+    #[serde(default)]
+    pub volume: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -3,7 +3,35 @@ import type { EconomyHistoryPoint, EconomyLine, EconomyOverview } from './api-ty
 export type EconomySort = 'name' | 'price' | 'change' | 'volume' | 'listings';
 export type PriceUnit = 'native' | 'chaos' | 'divine';
 export interface ChartPoint { x: number; y: number; label: string }
-export interface ChartSeries { currency: string; segments: string[]; points: ChartPoint[]; min: number; max: number }
+export interface ChartTick { position: number; label: string }
+export interface ChartSeries {
+  currency: string; segments: string[]; points: ChartPoint[]; min: number; max: number;
+  priceTicks: ChartTick[]; dayTicks: ChartTick[]; grid: string; dots: string;
+  volume: { bars: string; count: number; max: number };
+}
+
+export function historyDate(value: string | undefined): string {
+  return value?.slice(0, 10) ?? '';
+}
+
+function priceScale(min: number, max: number): { min: number; max: number; ticks: ChartTick[] } {
+  const padding = min === max ? Math.abs(min) * .05 || 1 : 0;
+  const low = Math.max(0, min - padding);
+  const high = max + padding;
+  const rawStep = (high - low) / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const step = ([1, 2, 2.5, 5, 10].find((multiple) => multiple * magnitude >= rawStep) ?? 10) * magnitude;
+  const start = Math.floor(low / step) * step;
+  const end = Math.ceil(high / step) * step;
+  const ticks = Array.from({ length: Math.round((end - start) / step) + 1 }, (_, index) => {
+    const value = start + index * step;
+    return {
+      position: (180 - (value - start) / (end - start) * 160) / 2,
+      label: formatNumber(value, { maximumFractionDigits: Math.min(20, Math.max(0, 1 - Math.floor(Math.log10(step)))) }),
+    };
+  });
+  return { min: start, max: end, ticks };
+}
 
 export function number(value: string | number | null | undefined): number | null {
   if (value === null || value === undefined || String(value).trim() === '') return null;
@@ -11,10 +39,11 @@ export function number(value: string | number | null | undefined): number | null
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function formatNumber(value: string | number | null | undefined): string {
+export function formatNumber(value: string | number | null | undefined, options?: Intl.NumberFormatOptions): string {
   const parsed = number(value);
   return parsed === null ? '-' : parsed.toLocaleString('en-CA',
-    parsed !== 0 && Math.abs(parsed) < 1 ? { maximumSignificantDigits: 4 } : { maximumFractionDigits: 2 });
+    options ?? (parsed !== 0 && Math.abs(parsed) < 1 ? { maximumSignificantDigits: 4 } : { maximumFractionDigits: 2 }))
+    .replaceAll(',', ' ').replace('.', ',');
 }
 
 export function variantLabel(line: EconomyLine): string {
@@ -82,12 +111,14 @@ export function historySeries(points: EconomyHistoryPoint[]): ChartSeries[] {
     const prices = sorted.map((point) => Number(point.price));
     const min = prices.length ? Math.min(...prices) : 0;
     const max = prices.length ? Math.max(...prices) : 0;
+    const scale = priceScale(min, max);
     const start = Date.parse(sorted[0]?.date ?? '');
     const end = Date.parse(sorted.at(-1)?.date ?? '');
     const chartPoints = sorted.map((point) => ({
       x: 16 + (Date.parse(point.date) - start) / (end - start || 1) * 768,
-      y: 180 - (Number(point.price) - min) / (max - min || 1) * 160,
-      label: `${point.date}: ${formatNumber(point.price)} ${currency} (${point.granularity})`,
+      y: 180 - (Number(point.price) - scale.min) / (scale.max - scale.min) * 160,
+      label: `${point.granularity === 'daily' ? historyDate(point.date)
+        : point.date.slice(0, 16).replace('T', ' ') + ' UTC'}: ${formatNumber(point.price)} ${currency} (${point.granularity})`,
     }));
     const segments: string[] = [];
     let segment: string[] = [];
@@ -104,7 +135,35 @@ export function historySeries(points: EconomyHistoryPoint[]): ChartSeries[] {
       if (position) segment.push(`${position.x},${position.y}`);
     });
     if (segment.length) segments.push(segment.join(' '));
-    return { currency, segments, points: chartPoints, min, max };
+    const dayIndices = new Map<string, number>();
+    sorted.forEach((point, index) => {
+      const day = historyDate(point.date);
+      if (!dayIndices.has(day)) dayIndices.set(day, index);
+    });
+    const days = [...dayIndices];
+    const tickCount = Math.min(5, days.length);
+    const dayTicks: ChartTick[] = Array.from({ length: tickCount }, (_, index) => {
+      const [date, pointIndex] = days[Math.round(index * (days.length - 1) / Math.max(1, tickCount - 1))]!;
+      return {
+        position: days.length === 1 ? 50 : chartPoints[pointIndex]!.x / 8,
+        label: new Date(`${date}T00:00:00Z`).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', timeZone: 'UTC' }),
+      };
+    });
+    const volumes = sorted.map((point) => number(point.volume)).filter((volume): volume is number => volume !== null && volume >= 0);
+    const volumeMax = volumes.length ? Math.max(...volumes) : 0;
+    const volumeBars = sorted.flatMap((point, index) => {
+      const volume = number(point.volume);
+      return volume !== null && volume >= 0 ? [`M${chartPoints[index]!.x},56 V${56 - volume / (volumeMax || 1) * 52}`] : [];
+    }).join(' ');
+    return {
+      currency, segments, points: chartPoints, min, max, priceTicks: scale.ticks, dayTicks,
+      grid: [
+        ...scale.ticks.map((tick) => `M16,${tick.position * 2} H784`),
+        ...dayTicks.map((tick) => `M${tick.position * 8},20 V180`),
+      ].join(' '),
+      dots: chartPoints.map(({ x, y }) => `M${x - 2.5},${y} a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0`).join(' '),
+      volume: { bars: volumeBars, count: volumes.length, max: volumeMax },
+    };
   });
 }
 

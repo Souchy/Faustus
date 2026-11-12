@@ -96,6 +96,10 @@ tbody tr:hover { background: #161616; }
 footer { display: flex; justify-content: center; align-items: center; gap: 16px; }
 
 .economy h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
+.economy-heading { min-width: 0; }
+.economy-breadcrumb h1 { overflow-wrap: anywhere; }
+.economy-breadcrumb button { padding: 0; border: 0; background: none; font: inherit; color: inherit; }
+.economy-breadcrumb button:hover { background: none; text-decoration: underline; }
 .economy h2 { font-size: 16px; margin: 0 0 6px; font-weight: 600; }
 .economy h3 { font-size: 14px; }
 .economy-context { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
@@ -128,7 +132,14 @@ footer { display: flex; justify-content: center; align-items: center; gap: 16px;
 .economy circle { fill: currentColor; }
 .mobile-category { display: none; }
 .item-detail { overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding: 0 8px 16px 0; }
-.detail-back { align-self: flex-start; }
+.item-detail > * { flex-shrink: 0; }
+.history-provenance { font-size: 12px; }
+.history-period { display: flex; flex-direction: column; gap: 10px; padding: 0 14px; }
+.history-brush { position: relative; height: 36px; margin: 4px 0; border: 1px solid #484848; background: #111; touch-action: none; user-select: none; cursor: crosshair; }
+.history-brush svg { display: block; width: 100%; height: 100%; }
+.period-selection { position: absolute; top: 0; bottom: 0; background: #ffffff12; pointer-events: none; }
+.period-handle { position: absolute; top: -4px; bottom: -4px; width: 12px; padding: 0; transform: translateX(-50%); touch-action: none; cursor: ew-resize; font-size: 10px; }
+.period-handle::after { content: ''; position: absolute; inset: -2px -6px; }
 .item-detail-heading { display: flex; align-items: center; gap: 16px; }
 .item-detail-heading > img { width: 64px; height: 64px; object-fit: contain; }
 .detail-value { margin-left: auto; font-size: 24px; }
@@ -141,7 +152,29 @@ footer { display: flex; justify-content: center; align-items: center; gap: 16px;
 .item-detail details summary { margin-bottom: 8px; }
 .history-chart { border: 1px solid #333; border-radius: 4px; background: #111; padding: 12px; }
 .history-chart svg { width: 100%; max-height: 280px; display: block; }
-.history-data { overflow-x: auto; }
+.history-axes { display: grid; grid-template-columns: 72px minmax(0, 1fr); grid-template-rows: auto 24px; column-gap: 6px; }
+.history-price-axis { position: relative; font-size: 11px; color: #aaa; }
+.history-price-axis span { position: absolute; right: 0; transform: translateY(-50%); white-space: nowrap; }
+.history-plot { position: relative; min-width: 0; }
+.history-plot svg { cursor: crosshair; height: clamp(160px, 24vw, 280px); }
+.history-day-axis { grid-column: 2; position: relative; color: #aaa; font-size: 11px; }
+.history-day-axis span { position: absolute; top: 4px; transform: translateX(-50%); white-space: nowrap; }
+.history-day-axis span:first-child { transform: none; }
+.history-day-axis span:last-child:not(:first-child) { transform: translateX(-100%); }
+.history-day-axis span:only-child { transform: translateX(-50%); }
+.economy .history-grid { stroke: #ffffff20; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.economy .history-dots { fill: currentColor; stroke: none; }
+.economy .history-guide { stroke: #aaa; stroke-width: 1; stroke-dasharray: 4 4; }
+.history-volume { margin-left: 78px; border-top: 1px solid #ffffff20; padding-top: 8px; }
+.history-volume .toolbar { font-size: 11px; }
+.history-volume svg { height: 56px; }
+.economy .history-volume-bars { stroke: #9ebcc6; stroke-width: 4; stroke-linecap: butt; opacity: .7; }
+.history-volume p { font-size: 11px; }
+.volume-unavailable { min-height: 36px; display: flex; align-items: center; }
+.history-tooltip { position: absolute; top: 8px; right: 8px; max-width: calc(100% - 16px); padding: 6px 8px; border: 1px solid #666; border-radius: 3px; background: #191919ee; font-size: 12px; pointer-events: none; overflow-wrap: anywhere; }
+.history-data { overflow: visible; }
+.history-data table { table-layout: fixed; }
+.history-data th, .history-data td { white-space: normal; overflow-wrap: anywhere; }
 .data-manager { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; min-height: 0; }
 .archive-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
 .archive-entry { border: 1px solid #333; border-radius: 4px; padding: 14px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }

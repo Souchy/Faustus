@@ -54,7 +54,11 @@
         </select>
       </label>
       <div class="toolbar">
-        <div><h1>${currentCategory.name ?? 'Economy'}</h1>
+        <div class="economy-heading">
+          <h1 if.bind="!selectedItem">${currentCategory.name ?? 'Economy'}</h1>
+          <nav if.bind="selectedItem" class="economy-breadcrumb" aria-label="Item breadcrumb">
+            <h1><button type="button" click.trigger="closeDetail()">${currentCategory.name ?? 'Economy'}</button><span aria-hidden="true"> &gt; </span><span aria-current="page">${selectedItem.name}</span></h1>
+          </nav>
           <p class="muted">poe.ninja ${source} estimates · ${browsingLeague}${historical ? ' · Historical' : ''} | Updated ${timestamp(overview.fetched_at)}</p>
         </div>
         <div class="source-tabs" aria-label="Price source">
@@ -64,6 +68,8 @@
       </div>
       <p if.bind="error" class="error" role="alert">${error} <button click.trigger="load()">Retry prices</button></p>
       <p if.bind="loading" class="muted" role="status">Loading ${currentCategory.name ?? 'economy'}...</p>
+      <p if.bind="historical" class="muted history-provenance">Icons: poe.ninja item metadata, including currency/fragment catalog entries without live prices, with GGG official trade metadata as a fallback; images from GGG web.poecdn.com CDN. Unavailable or ambiguous matches stay blank. Trends: saved daily prices over the 7 days ending on the selected date; gaps stay blank and % requires both endpoints.</p>
+      <p if.bind="iconError" class="error" role="alert">${iconError}</p>
       <div show.bind="!selectedItem" class="economy-list">
         <div class="economy-filters">
           <input type="search" aria-label="Search economy items" placeholder="Search items or variants..." value.bind="search" input.trigger="updateLines()">
@@ -113,7 +119,6 @@
         <footer if.bind="rows.length < filteredLines.length"><button click.trigger="showMore()">Show 100 more</button></footer>
       </div>
       <article if.bind="selectedItem" class="item-detail" aria-label="Item details">
-        <button class="detail-back" click.trigger="closeDetail()">Back to ${currentCategory.name}</button>
         <div class="item-detail-heading">
           <img if.bind="safeIcon(selectedItem.icon)" src.bind="safeIcon(selectedItem.icon)" alt="" referrerpolicy="no-referrer">
           <div><h2>${selectedItem.name}</h2><p class="muted">${variant(selectedItem)}</p></div>
@@ -129,18 +134,59 @@
         <details if.bind="itemMetadata.length"><summary>Item properties and modifiers</summary><dl class="item-stats"><template repeat.for="entry of itemMetadata"><dt>${entry.label}</dt><dd class="metadata-value">${entry.value}</dd></template></dl></details>
         <div class="toolbar">
           <h2>Price history</h2>
-          <label>Range <select aria-label="History range" value.bind="historyDays" change.trigger="loadHistory()"><option value="">All available</option><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></label>
+          <label>Range <select aria-label="History range" value.bind="historyDays" change.trigger="applyHistoryRange()"><option value="">All available / custom</option><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></label>
         </div>
         <p class="muted">Native quote units. Daily dump prices and timestamped live snapshots stay distinct. Gaps are not interpolated.</p>
         <p if.bind="historyLoading" role="status">Loading history...</p>
         <p if.bind="historyError" class="error" role="alert">${historyError} <button click.trigger="loadHistory()">Retry history</button></p>
         <p if.bind="history && !history.points.length" class="empty">No saved history for this exact item variant yet. Recent provider trend samples are shown below when available.</p>
+        <section if.bind="historyDates.length" class="history-period" aria-label="Graph period selection">
+          <p>Selected period: <strong>${periodDate(historyDates[periodStart])}</strong> – <strong>${periodDate(historyDates[periodEnd])}</strong></p>
+          <p class="muted">Drag anywhere on the overview graph in either direction to select a period, or adjust the handles. Double-click either handle to reset. Keyboard: arrow keys to adjust, Enter to reset. The chart and data table show the selected period.</p>
+          <div class="history-brush"
+            pointerdown.trigger="startPeriodDrag('range', $event)" pointermove.trigger="movePeriodDrag($event)"
+            pointerup.trigger="finishPeriodDrag($event)" pointercancel.trigger="endPeriodDrag($event)" lostpointercapture.trigger="endPeriodDrag($event)">
+            <svg viewBox="0 0 800 200" preserveAspectRatio="none" aria-hidden="true"><path d.bind="navigatorPath & attr"></path></svg>
+            <div class="period-selection" style.bind="'left:' + periodPosition(periodStart) + '%;width:' + (periodPosition(periodEnd) - periodPosition(periodStart)) + '%'"></div>
+            <button type="button" class="period-handle" role="slider" aria-label="Period start" aria-valuemin="0" aria-valuemax.bind="periodEnd" aria-valuenow.bind="periodStart" aria-valuetext.bind="periodDate(historyDates[periodStart])"
+              style.bind="'left:' + periodPosition(periodStart) + '%'" disabled.bind="historyDates.length < 2"
+              title="Drag to select period start; double-click or press Enter to reset"
+              pointerdown.trigger="startPeriodDrag('start', $event)" keydown.trigger="periodKey('start', $event)" dblclick.trigger="resetPeriod()">‖</button>
+            <button type="button" class="period-handle" role="slider" aria-label="Period end" aria-valuemin.bind="periodStart" aria-valuemax.bind="historyDates.length - 1" aria-valuenow.bind="periodEnd" aria-valuetext.bind="periodDate(historyDates[periodEnd])"
+              style.bind="'left:' + periodPosition(periodEnd) + '%'" disabled.bind="historyDates.length < 2"
+              title="Drag to select period end; double-click or press Enter to reset"
+              pointerdown.trigger="startPeriodDrag('end', $event)" keydown.trigger="periodKey('end', $event)" dblclick.trigger="resetPeriod()">‖</button>
+          </div>
+        </section>
         <div repeat.for="chart of series" class="history-chart">
           <div class="toolbar"><strong>${chart.currency}</strong><span>${format(chart.min)} – ${format(chart.max)}</span></div>
-          <svg viewBox="0 0 800 200" role="img" aria-label.bind="'Saved price history in ' + chart.currency">
-            <path d.bind="chartPath(chart.segments) & attr"></path>
-          </svg>
-          <p class="muted">${history.coverage.start} – ${history.coverage.end}</p>
+          <div class="history-axes">
+            <div class="history-price-axis" aria-label="Price axis">
+              <span repeat.for="tick of chart.priceTicks" style.bind="'top:' + tick.position + '%'">${tick.label}</span>
+            </div>
+            <div class="history-plot">
+              <svg viewBox="0 0 800 200" preserveAspectRatio="none" role="img" aria-label.bind="'Saved price history in ' + chart.currency"
+                pointermove.trigger="hoverHistory(chart, $event)" pointerleave.trigger="clearHistoryHover()" pointercancel.trigger="clearHistoryHover()">
+                <path class="history-grid" d.bind="chart.grid & attr"></path>
+                <path class="history-price-line" d.bind="chartPath(chart.segments) & attr"></path>
+                <path class="history-dots" d.bind="chart.dots & attr"></path>
+                <path class="history-guide" d.bind="(hoveredCurrency === chart.currency && hoveredPoint ? 'M' + hoveredPoint.x + ',0 V200' : '') & attr"></path>
+                <circle cx.bind="(hoveredPoint ? hoveredPoint.x : 0) & attr" cy.bind="(hoveredPoint ? hoveredPoint.y : 0) & attr" r.bind="(hoveredCurrency === chart.currency && hoveredPoint ? 4 : 0) & attr"></circle>
+              </svg>
+              <div if.bind="hoveredCurrency === chart.currency && hoveredPoint" class="history-tooltip" role="tooltip">${hoveredPoint.label}</div>
+            </div>
+            <div class="history-day-axis" aria-label="Day axis">
+              <span repeat.for="tick of chart.dayTicks" style.bind="'left:' + tick.position + '%'">${tick.label}</span>
+            </div>
+          </div>
+          <div class="history-volume" role="region" aria-label.bind="'Volume history in ' + chart.currency">
+            <div class="toolbar"><strong>Volume (${chart.currency})</strong><span if.bind="chart.volume.count">Max ${format(chart.volume.max)}</span></div>
+            <svg if.bind="chart.volume.count" viewBox="0 0 800 60" preserveAspectRatio="none" role="img" aria-label.bind="'Recorded volume in ' + chart.currency">
+              <path class="history-volume-bars" d.bind="chart.volume.bars & attr"></path>
+            </svg>
+            <p if.bind="!chart.volume.count" class="muted volume-unavailable">No recorded volume for this period. Historical dumps and older snapshots do not include volume.</p>
+            <p if.bind="chart.volume.count" class="muted">Provider-reported volume at each snapshot; not a sum of daily trades. Missing observations stay blank.</p>
+          </div>
         </div>
         <div if.bind="!history.points.length && selectedItem.sparkline.length" class="history-chart">
           <h3>Recent provider trend (%)</h3>
@@ -148,9 +194,9 @@
           <p class="muted">Relative trend samples, not timestamped historical prices.</p>
           <p>${selectedItem.sparkline.join(', ')}</p>
         </div>
-        <details if.bind="history.points.length" class="history-data"><summary>History data (${format(history.points.length)} observations)</summary>
+        <details if.bind="history.points.length" class="history-data"><summary>History data (${format(periodPoints.length)} observations)</summary>
           <table aria-label="Historical price observations"><thead><tr><th>Date / time</th><th>Price</th><th>Granularity</th></tr></thead><tbody><tr repeat.for="point of historyRows"><td>${point.date}</td><td>${format(point.price)} ${point.currency}</td><td>${point.granularity}</td></tr></tbody></table>
-          <button if.bind="historyRows.length < history.points.length" click.trigger="historyLimit = historyLimit + 100">Show more observations</button>
+          <button if.bind="historyRows.length < periodPoints.length" click.trigger="historyLimit = historyLimit + 100">Show more observations</button>
         </details>
       </article>
     </div>

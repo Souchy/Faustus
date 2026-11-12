@@ -1,9 +1,184 @@
+use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashSet};
 
 use market_core::economy::{Archive, Coverage, History, Line, Observation, Overview, Point};
 use sqlx::Row;
 
 use crate::{SqliteStore, StoreError};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn history_preserves_observed_volume_and_missing_values_without_using_latest_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("volume.sqlite3");
+        let store = SqliteStore::connect(&path).await.unwrap();
+        for (date, volume) in [
+            ("2026-01-01T00:00:00Z", Some("100.5")),
+            ("2026-01-01T00:15:00Z", None),
+            ("2026-01-01T00:30:00Z", Some("0")),
+        ] {
+            store
+                .save_economy(&Overview {
+                    league: "Standard".into(),
+                    category: "Currency".into(),
+                    source: "exchange".into(),
+                    fetched_at: date.into(),
+                    quote_currency: "Chaos Orb".into(),
+                    rates: BTreeMap::new(),
+                    lines: vec![Line {
+                        id: "divine".into(),
+                        price: Some("200".into()),
+                        volume: volume.map(str::to_owned),
+                        ..Line::default()
+                    }],
+                })
+                .await
+                .unwrap();
+        }
+        let reopened = SqliteStore::connect(&path).await.unwrap();
+        let history = reopened
+            .economy_history("Standard", "Currency", "exchange", "divine", None)
+            .await
+            .unwrap();
+        assert_eq!(history.points.len(), 3);
+        assert_eq!(history.points[0].volume.as_deref(), Some("100.5"));
+        assert_eq!(history.points[1].volume, None);
+        assert_eq!(history.points[2].volume.as_deref(), Some("0"));
+    }
+
+    #[tokio::test]
+    async fn icon_metadata_prefers_one_feed_and_includes_dump_currency_fragments() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(directory.path().join("icons.sqlite3"))
+            .await
+            .unwrap();
+        for (category, source, name, icon) in [
+            ("Currency", "stash", "Divine Orb", "/stash.png"),
+            ("Currency", "exchange", "Divine Orb", "/exchange.png"),
+            ("Fragment", "stash", "Fragment", "/fragment.png"),
+        ] {
+            store
+                .save_economy(&Overview {
+                    league: "Standard".into(),
+                    category: category.into(),
+                    source: source.into(),
+                    fetched_at: "2026-01-01".into(),
+                    quote_currency: "Chaos Orb".into(),
+                    rates: BTreeMap::new(),
+                    lines: if source == "exchange" {
+                        vec![
+                            Line {
+                                id: name.into(),
+                                name: name.into(),
+                                icon: Some(icon.into()),
+                                ..Line::default()
+                            },
+                            Line {
+                                id: "Foulborn Exalted Orb".into(),
+                                name: "Foulborn Exalted Orb".into(),
+                                icon: Some("/foulborn.png".into()),
+                                ..Line::default()
+                            },
+                        ]
+                    } else {
+                        vec![Line {
+                            id: name.into(),
+                            name: name.into(),
+                            icon: Some(icon.into()),
+                            ..Line::default()
+                        }]
+                    },
+                })
+                .await
+                .unwrap();
+        }
+        let lines = store.economy_icon_metadata("Currency").await.unwrap();
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().any(|line| line.name == "Foulborn Exalted Orb"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.icon.as_deref() == Some("/stash.png"))
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.icon.as_deref() == Some("/exchange.png"))
+        );
+        assert_eq!(
+            store.economy_icon_metadata("Fragment").await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn daily_trends_end_at_selected_date_preserve_gaps_and_require_endpoints() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(directory.path().join("trend.sqlite3"))
+            .await
+            .unwrap();
+        let archive = Archive {
+            name: "Test".into(),
+            status: "completed".into(),
+            rows: 5,
+            skipped: 0,
+            error: None,
+            start: None,
+            end: None,
+            league: Some("Test".into()),
+            progress: String::new(),
+            license: "CC BY-SA".into(),
+            url: String::new(),
+        };
+        store.save_economy_import(&archive, None).await.unwrap();
+        let observations =
+            [(1, "20"), (2, "25"), (4, "30"), (8, "40"), (9, "1000")].map(|(day, price)| {
+                Observation {
+                    category: "SkillGem".into(),
+                    line: Line {
+                        id: "archive:test".into(),
+                        name: "Fireball".into(),
+                        price: Some(price.into()),
+                        ..Line::default()
+                    },
+                    point: Point {
+                        date: format!("2026-01-{day:02}"),
+                        price: price.into(),
+                        currency: "Chaos Orb".into(),
+                        granularity: "daily".into(),
+                        volume: None,
+                    },
+                }
+            });
+        store
+            .save_observations("Test", "stash", &observations, Some("Test"))
+            .await
+            .unwrap();
+        let overview = store
+            .historical_economy("Test", "SkillGem", "stash", "2026-01-08")
+            .await
+            .unwrap();
+        assert_eq!(overview.lines[0].price.as_deref(), Some("40"));
+        assert_eq!(overview.lines[0].change.as_deref(), Some("100"));
+        assert_eq!(overview.lines[0].sparkline.len(), 8);
+        assert_eq!(overview.lines[0].sparkline[2], None);
+        let overview = store
+            .historical_economy("Test", "SkillGem", "stash", "2026-01-04")
+            .await
+            .unwrap();
+        assert!(overview.lines[0].change.is_none());
+        assert!(overview.lines[0].sparkline.iter().any(Option::is_some));
+        assert!(overview.lines[0].listings.is_none());
+        let history = store
+            .economy_history("Test", "SkillGem", "stash", "archive:test", None)
+            .await
+            .unwrap();
+        assert!(history.points.iter().all(|point| point.volume.is_none()));
+    }
+}
 
 impl SqliteStore {
     pub fn try_economy_import_lock(&self, name: &str) -> std::io::Result<Option<std::fs::File>> {
@@ -51,6 +226,7 @@ impl SqliteStore {
                         price: price.clone(),
                         currency: overview.quote_currency.clone(),
                         granularity: "snapshot".into(),
+                        volume: line.volume.clone(),
                     },
                 })
             })
@@ -107,8 +283,9 @@ impl SqliteStore {
             });
             query.push(" ON CONFLICT(league,category,source,item) DO UPDATE SET line_json=excluded.line_json")
                 .build().execute(&mut *transaction).await?;
-            let mut query =
-                sqlx::QueryBuilder::<sqlx::Sqlite>::new("INSERT INTO economy_observations ");
+            let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "INSERT INTO economy_observations (league,category,source,item,observed_at,granularity,price,currency,archive,volume) ",
+            );
             query.push_values(batch, |mut row, observation| {
                 row.push_bind(league)
                     .push_bind(&observation.category)
@@ -118,7 +295,8 @@ impl SqliteStore {
                     .push_bind(&observation.point.granularity)
                     .push_bind(&observation.point.price)
                     .push_bind(&observation.point.currency)
-                    .push_bind(archive);
+                    .push_bind(archive)
+                    .push_bind(&observation.point.volume);
             });
             query
                 .push(" ON CONFLICT DO NOTHING")
@@ -201,6 +379,65 @@ impl SqliteStore {
             }
             lines.push(line);
         }
+        let end = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        let start = end
+            .checked_sub_signed(chrono::Duration::days(7))
+            .unwrap_or(end);
+        let trends = sqlx::query(
+            "SELECT item,observed_at,price,currency FROM economy_observations
+             WHERE league=? AND category=? AND source=? AND granularity='daily'
+             AND observed_at>=? AND observed_at<=?
+             AND archive IN (SELECT name FROM economy_imports WHERE json_extract(status_json,'$.status')='completed')
+             ORDER BY observed_at")
+            .bind(league).bind(category).bind(source).bind(start.to_string()).bind(date)
+            .fetch_all(&self.pool).await?;
+        let mut daily = BTreeMap::<String, BTreeMap<String, (String, String)>>::new();
+        for row in trends {
+            daily.entry(row.get("item")).or_default().insert(
+                row.get("observed_at"),
+                (row.get("price"), row.get("currency")),
+            );
+        }
+        for line in &mut lines {
+            let Some(points) = daily.get(&line.id) else {
+                continue;
+            };
+            let Some((_, (base, currency))) = points.first_key_value() else {
+                continue;
+            };
+            let base = base
+                .parse::<Decimal>()
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            if base <= Decimal::ZERO {
+                continue;
+            }
+            line.sparkline = (0..=7)
+                .map(|offset| {
+                    let day = start + chrono::Duration::days(offset);
+                    let (price, unit) = points.get(&day.to_string())?;
+                    if unit != currency {
+                        return None;
+                    }
+                    price
+                        .parse::<Decimal>()
+                        .ok()?
+                        .checked_div(base)?
+                        .checked_sub(Decimal::ONE)?
+                        .checked_mul(Decimal::from(100))
+                        .map(|value| value.normalize().to_string())
+                })
+                .collect();
+            line.change = if points.contains_key(&start.to_string()) {
+                line.sparkline.last().cloned().flatten()
+            } else {
+                None
+            };
+            line.metadata.insert(
+                "trend_period".into(),
+                "7-day daily history ending on selected date".into(),
+            );
+        }
         let mut rates = BTreeMap::new();
         rates.insert(quote_currency.clone(), "1".into());
         // Historical conversion is only possible with an observed rate on this same day.
@@ -229,6 +466,35 @@ impl SqliteStore {
         })
     }
 
+    pub async fn economy_icon_metadata(&self, category: &str) -> Result<Vec<Line>, StoreError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "WITH preferred AS (
+               SELECT overview_json,source,row_number() OVER (PARTITION BY category,source ORDER BY
+                 CASE WHEN league='Standard' THEN 0 ELSE 1 END,league) AS rank
+               FROM economy_current WHERE category=? OR
+                 (?='Currency' AND (category='Fragment' OR source='exchange')))
+             SELECT overview_json FROM preferred WHERE rank=1
+             ORDER BY CASE WHEN source='stash' THEN 0 ELSE 1 END",
+        )
+        .bind(category)
+        .bind(category)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut lines = Vec::new();
+        let mut preferred_names = HashSet::new();
+        for json in rows {
+            let overview: Overview = serde_json::from_str(&json)?;
+            let candidates: Vec<Line> = overview
+                .lines
+                .into_iter()
+                .filter(|line| line.icon.is_some() && !preferred_names.contains(&line.name))
+                .collect();
+            preferred_names.extend(candidates.iter().map(|line| line.name.clone()));
+            lines.extend(candidates);
+        }
+        Ok(lines)
+    }
+
     pub async fn economy_history(
         &self,
         league: &str,
@@ -251,8 +517,8 @@ impl SqliteStore {
             })
             .unwrap_or_default();
         let rows = sqlx::query(
-            "SELECT observed_at,price,currency,granularity FROM (
-               SELECT observed_at,price,currency,granularity FROM economy_observations o
+            "SELECT observed_at,price,currency,granularity,volume FROM (
+               SELECT observed_at,price,currency,granularity,volume FROM economy_observations o
                WHERE league=? AND category=? AND source=? AND item=? AND observed_at>=?
                AND (archive IS NULL OR EXISTS (SELECT 1 FROM economy_imports a WHERE a.name=o.archive AND json_extract(a.status_json,'$.status')='completed'))
                ORDER BY observed_at DESC LIMIT 20000) ORDER BY observed_at")
@@ -264,6 +530,7 @@ impl SqliteStore {
                 price: row.get("price"),
                 currency: row.get("currency"),
                 granularity: row.get("granularity"),
+                volume: row.get("volume"),
             })
             .collect();
         Ok(History {

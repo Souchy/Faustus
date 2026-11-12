@@ -417,6 +417,7 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
             5_i64,
             include_str!("../migrations/0005_economy_dates_covering.sql"),
         ),
+        (6_i64, include_str!("../migrations/0006_economy_volume.sql")),
     ] {
         let applied: Option<i64> =
             sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = ?")
@@ -653,7 +654,7 @@ mod tests {
     #[tokio::test]
     async fn backfills_category_catalog_without_changing_existing_observations() {
         let (_directory, store) = store().await;
-        sqlx::query("INSERT INTO economy_observations VALUES ('Standard','Currency','exchange','chaos','2026-01-01','snapshot','1','Chaos Orb',NULL)")
+        sqlx::query("INSERT INTO economy_observations (league,category,source,item,observed_at,granularity,price,currency,archive) VALUES ('Standard','Currency','exchange','chaos','2026-01-01','snapshot','1','Chaos Orb',NULL)")
             .execute(&store.pool).await.unwrap();
         sqlx::query("DROP TABLE economy_categories")
             .execute(&store.pool)

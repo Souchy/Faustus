@@ -437,6 +437,7 @@ fn observation<'a>(
             price: price.normalize().to_string(),
             currency: "Chaos Orb".into(),
             granularity: "daily".into(),
+            volume: None,
         },
     })
 }

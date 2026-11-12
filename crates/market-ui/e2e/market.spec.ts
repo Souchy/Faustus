@@ -81,11 +81,17 @@ test('economy categories, facets, source views, details and responsive layout', 
   await expect(page.locator('.economy-item')).toContainText('Corrupted');
   await page.locator('.economy-item').click();
   await expect(page.getByRole('article', { name: 'Item details' })).toBeVisible();
+  const breadcrumb = page.getByRole('navigation', { name: 'Item breadcrumb', exact: true });
+  await expect(breadcrumb.getByRole('heading', { level: 1 })).toHaveText('Skill Gems > Fireball');
+  await expect(breadcrumb.locator('[aria-current="page"]')).toHaveText('Fireball');
+  await expect(page.getByRole('button', { name: /^Back to / })).toHaveCount(0);
   await expect(page.getByRole('img', { name: 'Saved price history in Chaos Orb' })).toBeVisible();
-  await expect(page.locator('.history-chart path')).toHaveAttribute('d', /^M.+L/);
+  await expect(page.locator('.history-price-line')).toHaveAttribute('d', /^M.+L/);
   await page.getByText('History data (2 observations)', { exact: true }).click();
   await expect(page.getByRole('table', { name: 'Historical price observations' }).locator('tbody tr')).toHaveCount(2);
-  await page.getByRole('button', { name: 'Back to Skill Gems' }).click();
+  await breadcrumb.getByRole('button', { name: 'Skill Gems', exact: true }).click();
+  await expect(breadcrumb).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Skill Gems', exact: true, level: 1 })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'Gem level', exact: true })).toHaveValue('21');
   await page.getByRole('button', { name: 'Maps', exact: true }).click();
   await page.getByRole('combobox', { name: 'Map tier', exact: true }).selectOption('16');
@@ -95,6 +101,215 @@ test('economy categories, facets, source views, details and responsive layout', 
   await page.getByRole('combobox', { name: 'Economy category', exact: true }).selectOption('Currency');
   await expect(page.locator('.economy-table')).toContainText('Vaal Orb');
   expect(errors).toEqual([]);
+});
+
+test('graph handles drag both period edges and history scrolls with the detail page', async ({ page }) => {
+  await service(page);
+  const points = Array.from({ length: 40 }, (_, index) => ({
+    date: new Date(Date.UTC(2026, 6, 1 + index)).toISOString().slice(0, 10),
+    price: String(index + 1), currency: 'Chaos Orb', granularity: 'daily',
+  }));
+  await page.route('**/api/v1/economy/history?**', (route) => route.fulfill({
+    json: { points, coverage: { start: points[0]!.date, end: points.at(-1)!.date } },
+  }));
+  await page.goto('/');
+  await page.locator('.economy-item').first().click();
+  await expect(page.getByText('History data (40 observations)', { exact: true })).toBeVisible();
+  const start = page.getByRole('slider', { name: 'Period start', exact: true });
+  const end = page.getByRole('slider', { name: 'Period end', exact: true });
+  const brush = await page.locator('.history-brush').boundingBox();
+  expect(brush).not.toBeNull();
+  expect(brush!.height).toBeLessThanOrEqual(40);
+  expect((await start.boundingBox())!.width).toBeLessThanOrEqual(14);
+  await expect(page.getByRole('button', { name: 'Reset period', exact: true })).toHaveCount(0);
+  await start.scrollIntoViewIfNeeded();
+  const box = await page.locator('.history-brush').boundingBox();
+  const startBox = await start.boundingBox();
+  await page.mouse.move(startBox!.x + startBox!.width / 2, startBox!.y + startBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box!.x + box!.width * .25, box!.y + box!.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(start).toHaveAttribute('aria-valuenow', '10');
+  const endBox = await end.boundingBox();
+  await page.mouse.move(endBox!.x + endBox!.width / 2, endBox!.y + endBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box!.x + box!.width * .75, box!.y + box!.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(end).toHaveAttribute('aria-valuenow', '29');
+  await page.getByText('History data (20 observations)', { exact: true }).click();
+  const table = page.getByRole('table', { name: 'Historical price observations' });
+  await expect(table.locator('tbody tr')).toHaveCount(20);
+  expect(await page.locator('.history-data').evaluate((element) =>
+    element.clientHeight >= element.scrollHeight - 1)).toBe(true);
+  await end.focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(end).toHaveAttribute('aria-valuenow', '28');
+  await end.dblclick();
+  await expect(table.locator('tbody tr')).toHaveCount(40);
+  await start.press('ArrowRight');
+  await expect(start).toHaveAttribute('aria-valuenow', '1');
+  await start.dblclick();
+  await expect(start).toHaveAttribute('aria-valuenow', '0');
+  await end.press('ArrowLeft');
+  await end.press('Enter');
+  await expect(end).toHaveAttribute('aria-valuenow', '39');
+  await table.locator('tbody tr').last().scrollIntoViewIfNeeded();
+  await expect(table.locator('tbody tr').last()).toBeVisible();
+});
+
+test('selected history dates persist across items, live leagues and archive datasets', async ({ page }) => {
+  await service(page);
+  await page.route('**/api/v1/economy/history?**', (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    const days = query.get('league') === 'Other' ? [5, 6] : query.get('league') === 'Ancestors' ? [4, 5, 6, 7, 8, 9]
+      : query.get('item') === 'vaal' ? [2, 3, 5, 8, 10] : Array.from({ length: 11 }, (_, index) => index + 1);
+    const points = days.map((day) => ({
+      date: `2026-07-${String(day).padStart(2, '0')}`, price: String(day), currency: 'Chaos Orb', granularity: 'daily',
+    }));
+    return route.fulfill({ json: { points, coverage: { start: points[0]!.date, end: points.at(-1)!.date } } });
+  });
+  await page.goto('/');
+  await page.locator('.economy-item').filter({ hasText: "Gemcutter's Prism" }).click();
+  const start = page.getByRole('slider', { name: 'Period start', exact: true });
+  const end = page.getByRole('slider', { name: 'Period end', exact: true });
+  await start.press('ArrowRight');
+  await start.press('ArrowRight');
+  await end.press('ArrowLeft');
+  await end.press('ArrowLeft');
+  await end.press('ArrowLeft');
+  const period = page.locator('.history-period > p').first();
+  await expect(period).toHaveText('Selected period: 2026-07-03 – 2026-07-08');
+  await page.getByRole('navigation', { name: 'Item breadcrumb', exact: true }).getByRole('button', { name: 'Currency', exact: true }).click();
+  await page.locator('.economy-item').filter({ hasText: 'Vaal Orb' }).click();
+  await expect(period).toHaveText('Selected period: 2026-07-03 – 2026-07-08');
+  await expect(start).toHaveAttribute('aria-valuenow', '1');
+  await expect(end).toHaveAttribute('aria-valuenow', '3');
+  await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('Other');
+  await page.locator('.economy-item').filter({ hasText: "Gemcutter's Prism" }).click();
+  await expect(period).toHaveText('Selected period: 2026-07-05 – 2026-07-06');
+  await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('Standard');
+  await page.locator('.economy-item').filter({ hasText: "Gemcutter's Prism" }).click();
+  await expect(period).toHaveText('Selected period: 2026-07-03 – 2026-07-08');
+  await page.getByRole('combobox', { name: 'Economy dataset', exact: true }).selectOption('Ancestors');
+  await page.locator('.economy-item').filter({ hasText: "Gemcutter's Prism" }).click();
+  await expect(period).toHaveText('Selected period: 2026-07-04 – 2026-07-08');
+  await page.getByRole('combobox', { name: 'Economy dataset', exact: true }).selectOption('');
+  await page.locator('.economy-item').filter({ hasText: "Gemcutter's Prism" }).click();
+  await expect(period).toHaveText('Selected period: 2026-07-03 – 2026-07-08');
+  await end.press('Enter');
+  await page.getByRole('navigation', { name: 'Item breadcrumb', exact: true }).getByRole('button', { name: 'Currency', exact: true }).click();
+  await page.locator('.economy-item').filter({ hasText: 'Vaal Orb' }).click();
+  await expect(period).toHaveText('Selected period: 2026-07-02 – 2026-07-10');
+});
+
+test('overview graph drag selects ordered periods and captures releases beyond either edge', async ({ page }) => {
+  await service(page);
+  const points = Array.from({ length: 11 }, (_, index) => ({
+    date: `2026-07-${String(index + 1).padStart(2, '0')}`,
+    price: String(index + 1), currency: 'Chaos Orb', granularity: 'daily',
+  }));
+  await page.route('**/api/v1/economy/history?**', (route) => route.fulfill({
+    json: { points, coverage: { start: points[0]!.date, end: points.at(-1)!.date } },
+  }));
+  await page.goto('/');
+  await page.locator('.economy-item').first().click();
+  const graph = page.locator('.history-brush');
+  const start = page.getByRole('slider', { name: 'Period start', exact: true });
+  const end = page.getByRole('slider', { name: 'Period end', exact: true });
+  for (const [from, to, expectedStart, expectedEnd] of [
+    [.2, .7, 2, 7], [.8, .3, 3, 8], [.4, -.1, 0, 4], [.6, 1.1, 6, 10], [.8, .1, 1, 8], [.4, .4, 4, 4],
+  ]) {
+    await graph.scrollIntoViewIfNeeded();
+    const bounds = (await graph.boundingBox())!;
+    await page.mouse.move(bounds.x + bounds.width * from!, bounds.y + bounds.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(bounds.x + bounds.width * to!, bounds.y + bounds.height + 30, { steps: 8 });
+    await page.mouse.up();
+    await expect(start).toHaveAttribute('aria-valuenow', String(expectedStart));
+    await expect(end).toHaveAttribute('aria-valuenow', String(expectedEnd));
+    await expect(page.getByText(`History data (${expectedEnd! - expectedStart! + 1} observations)`, { exact: true })).toBeVisible();
+  }
+  await end.press('Enter');
+  await page.setViewportSize({ width: 390, height: 800 });
+  await graph.scrollIntoViewIfNeeded();
+  const bounds = (await graph.boundingBox())!;
+  const touch = await page.context().newCDPSession(page);
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: bounds.x + bounds.width * .7, y: bounds.y + bounds.height / 2 }] });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: bounds.x - 12, y: bounds.y + bounds.height + 20 }] });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await touch.detach();
+  await expect(start).toHaveAttribute('aria-valuenow', '0');
+  await expect(end).toHaveAttribute('aria-valuenow', '7');
+  await end.press('Enter');
+  await expect(end).toHaveAttribute('aria-valuenow', '10');
+});
+
+test('history hover shows a guide and saved price at the nearest day in desktop and mobile layouts', async ({ page }) => {
+  await service(page);
+  await page.goto('/');
+  await page.locator('.economy-item').first().click();
+  const chart = page.getByRole('img', { name: 'Saved price history in Chaos Orb', exact: true });
+  const tooltip = page.getByRole('tooltip');
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    await chart.scrollIntoViewIfNeeded();
+    const bounds = await chart.boundingBox();
+    await page.mouse.move(bounds!.x + bounds!.width * .02, bounds!.y + bounds!.height / 2);
+    await expect(tooltip).toHaveText('2026-07-15: 1 Chaos Orb (daily)');
+    await expect(page.locator('.history-guide')).toHaveAttribute('d', 'M16,0 V200');
+    await expect(page.locator('.history-plot circle')).toHaveAttribute('cx', '16');
+    await expect(page.locator('.history-plot circle')).toHaveAttribute('r', '4');
+    await page.mouse.move(bounds!.x + bounds!.width * .98, bounds!.y + bounds!.height / 2);
+    await expect(tooltip).toHaveText('2026-07-16: 2 Chaos Orb (daily)');
+    await expect(page.locator('.history-guide')).toHaveAttribute('d', 'M784,0 V200');
+    await page.getByRole('slider', { name: 'Period start', exact: true }).press('ArrowRight');
+    await expect(tooltip).toHaveCount(0);
+    await chart.scrollIntoViewIfNeeded();
+    await chart.hover();
+    await expect(tooltip).toHaveText('2026-07-16: 2 Chaos Orb (daily)');
+    await page.getByRole('slider', { name: 'Period start', exact: true }).press('Enter');
+    await chart.hover();
+    await page.mouse.move(0, 0);
+    await expect(tooltip).toHaveCount(0);
+    await expect(page.locator('.history-guide')).toHaveAttribute('d', '');
+  }
+});
+
+test('price axes, point dots and compact volume graph follow the selected period', async ({ page }) => {
+  await service(page);
+  const points = [
+    { date: '2026-07-14T12:15:43.123Z', price: '10000', volume: '20000', currency: 'Chaos Orb', granularity: 'snapshot' },
+    { date: '2026-07-15T12:15:43.123Z', price: '20000', volume: null, currency: 'Chaos Orb', granularity: 'snapshot' },
+    { date: '2026-07-16T12:15:43.123Z', price: '30000', volume: '80000', currency: 'Chaos Orb', granularity: 'snapshot' },
+  ];
+  await page.route('**/api/v1/economy/history?**', (route) => route.fulfill({
+    json: { points, coverage: { start: points[0]!.date, end: points.at(-1)!.date } },
+  }));
+  await page.goto('/');
+  await page.locator('.economy-item').first().click();
+  await expect(page.locator('.history-period > p').first()).toHaveText('Selected period: 2026-07-14 – 2026-07-16');
+  await expect(page.getByLabel('Price axis')).toHaveText('10 00015 00020 00025 00030 000');
+  await expect(page.getByLabel('Day axis')).toContainText('Jul 14');
+  expect((await page.locator('.history-dots').getAttribute('d'))?.match(/M/g)).toHaveLength(3);
+  await expect(page.locator('.history-grid')).toHaveAttribute('d', /H784/);
+  const volume = page.getByRole('region', { name: 'Volume history in Chaos Orb', exact: true });
+  await expect(volume).toContainText('Max 80 000');
+  const volumePlot = volume.getByRole('img');
+  expect((await volumePlot.boundingBox())!.height).toBeLessThanOrEqual(60);
+  expect((await volume.locator('path').getAttribute('d'))?.match(/M/g)).toHaveLength(2);
+  const end = page.getByRole('slider', { name: 'Period end', exact: true });
+  const start = page.getByRole('slider', { name: 'Period start', exact: true });
+  await end.press('ArrowLeft');
+  await expect(volume).toContainText('Max 20 000');
+  await expect(page.getByLabel('Price axis')).not.toContainText('30');
+  await start.press('ArrowRight');
+  await expect(volume).toContainText('No recorded volume for this period');
+  await expect(volumePlot).toHaveCount(0);
+  await start.press('Enter');
+  await expect(volume).toContainText('Max 80 000');
+  await page.setViewportSize({ width: 390, height: 800 });
+  await expect(page.getByLabel('Day axis')).toBeVisible();
+  expect(await page.locator('.history-chart').evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
 test('historical datasets and import manager do not select an archived league for the collector', async ({ page }) => {

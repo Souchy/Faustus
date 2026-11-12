@@ -40,6 +40,23 @@ pub(crate) struct EconomyState {
     pub(crate) import_lock: Mutex<()>,
     pub(crate) worker_lock: Mutex<()>,
     catalog: RwLock<Option<(Instant, Vec<Archive>)>>,
+    trade_icons: Mutex<Option<(Instant, TradeStatic)>>,
+}
+
+#[derive(Deserialize)]
+struct TradeStatic {
+    result: Vec<TradeGroup>,
+}
+
+#[derive(Deserialize)]
+struct TradeGroup {
+    entries: Vec<TradeIcon>,
+}
+
+#[derive(Deserialize)]
+struct TradeIcon {
+    text: String,
+    image: Option<String>,
 }
 
 pub fn routes() -> Router<ServiceState> {
@@ -166,11 +183,7 @@ async fn load(
 ) -> Result<Overview, ApiError> {
     validate(&query)?;
     if let Some(date) = &query.date {
-        return state
-            .economy_store
-            .historical_economy(&query.league, &query.category, &query.source, date)
-            .await
-            .map_err(failure);
+        return historical_overview(&state, &query, date).await;
     }
     let live = leagues(State(state.clone()))
         .await
@@ -196,16 +209,7 @@ async fn load(
             .map_err(failure)?
             .into_iter()
             .next();
-        return state
-            .economy_store
-            .historical_economy(
-                &query.league,
-                &query.category,
-                &query.source,
-                date.as_deref().unwrap_or("0001-01-01"),
-            )
-            .await
-            .map_err(failure);
+        return historical_overview(&state, &query, date.as_deref().unwrap_or("0001-01-01")).await;
     }
     let category = dto::categories()
         .into_iter()
@@ -232,6 +236,259 @@ async fn load(
         .await
         .map_err(failure)?;
     Ok(result)
+}
+
+async fn historical_overview(
+    state: &ServiceState,
+    query: &OverviewQuery,
+    date: &str,
+) -> Result<Overview, ApiError> {
+    let mut overview = state
+        .economy_store
+        .historical_economy(&query.league, &query.category, &query.source, date)
+        .await
+        .map_err(failure)?;
+    let mut metadata = state
+        .economy_store
+        .economy_icon_metadata(&query.category)
+        .await
+        .map_err(failure)?;
+    if metadata.is_empty() && !overview.lines.is_empty() {
+        if let Some(category) = dto::categories()
+            .into_iter()
+            .find(|c| c.id == query.category)
+        {
+            let source = &category.sources[0];
+            let result = async {
+                let raw = raw_overview(state, "Standard", &query.category, source, false).await?;
+                let live = normalize(
+                    &OverviewQuery {
+                        league: "Standard".into(),
+                        source: source.clone(),
+                        date: None,
+                        ..query.clone()
+                    },
+                    &raw.body,
+                    raw.fetched_at.to_rfc3339(),
+                )
+                .map_err(failure)?;
+                state
+                    .economy_store
+                    .save_economy(&live)
+                    .await
+                    .map_err(failure)?;
+                Ok::<_, ApiError>(live.lines)
+            }
+            .await;
+            match result {
+                Ok(lines) => metadata = lines,
+                Err(error) => icon_error(&mut overview.lines, &error.1),
+            }
+        }
+    }
+    enrich_icons(&mut overview.lines, &metadata);
+    if matches!(query.category.as_str(), "Currency" | "Fragment") {
+        let categories = if query.category == "Currency" {
+            ["Currency", "Fragment"]
+        } else {
+            ["Fragment", "Currency"]
+        };
+        for category in categories {
+            if overview.lines.iter().all(|line| line.icon.is_some()) {
+                break;
+            }
+            let result = async {
+                let raw = raw_overview(state, "Standard", category, "stash", false).await?;
+                currency_icon_metadata(&raw.body).map_err(failure)
+            }
+            .await;
+            match result {
+                Ok(metadata) => enrich_icons(&mut overview.lines, &metadata),
+                Err(error) => icon_error(&mut overview.lines, &error.1),
+            }
+        }
+    }
+    if matches!(query.category.as_str(), "Currency" | "Fragment")
+        && overview.lines.iter().any(|line| line.icon.is_none())
+    {
+        if let Err(error) = trade_icons(state, &mut overview.lines).await {
+            icon_error(&mut overview.lines, &error.1);
+        }
+    }
+    Ok(overview)
+}
+
+fn currency_icon_metadata(body: &Value) -> Result<Vec<Line>, String> {
+    let details = body
+        .get("currencyDetails")
+        .ok_or("Currency overview is missing currencyDetails icon metadata.")?;
+    let details: Vec<ninja_fetch::CurrencyDetails> =
+        serde_json::from_value(details.clone()).map_err(|error| error.to_string())?;
+    Ok(details
+        .into_iter()
+        .map(|item| Line {
+            id: item.id.to_string(),
+            name: item.name,
+            icon: item.icon,
+            ..Line::default()
+        })
+        .collect())
+}
+
+fn icon_error(lines: &mut [Line], error: &str) {
+    eprintln!("Historical icon metadata: {error}");
+    for line in lines.iter_mut().filter(|line| line.icon.is_none()) {
+        line.metadata.insert(
+            "icon_error".into(),
+            format!("Icon metadata unavailable: {error}").into(),
+        );
+    }
+}
+
+async fn trade_icons(state: &ServiceState, lines: &mut [Line]) -> Result<(), ApiError> {
+    let mut cached = state.economy.trade_icons.lock().await;
+    if cached
+        .as_ref()
+        .is_none_or(|(checked, _)| checked.elapsed() >= Duration::from_secs(24 * 60 * 60))
+    {
+        let client = reqwest::Client::builder()
+            .user_agent(state.user_agent.as_ref())
+            .timeout(Duration::from_secs(20))
+            .build()
+            .map_err(failure)?;
+        let metadata: TradeStatic = client
+            .get("https://www.pathofexile.com/api/trade/data/static")
+            .send()
+            .await
+            .map_err(failure)?
+            .error_for_status()
+            .map_err(failure)?
+            .json()
+            .await
+            .map_err(failure)?;
+        *cached = Some((Instant::now(), metadata));
+    }
+    if let Some((_, metadata)) = cached.as_ref() {
+        enrich_trade_icons(lines, metadata);
+    }
+    Ok(())
+}
+
+fn enrich_trade_icons(lines: &mut [Line], metadata: &TradeStatic) {
+    let candidates: Vec<Line> = metadata
+        .result
+        .iter()
+        .flat_map(|group| &group.entries)
+        .map(|entry| Line {
+            name: entry.text.clone(),
+            icon: entry.image.clone(),
+            ..Line::default()
+        })
+        .collect();
+    for line in lines
+        .iter_mut()
+        .filter(|line| line.icon.is_none() && icon_variant(line).is_empty())
+    {
+        enrich_icons(std::slice::from_mut(line), &candidates);
+        if line.icon.is_some() {
+            line.metadata.remove("icon_error");
+            line.metadata.insert("icon_source".into(),
+                "Grinding Gear Games official trade static metadata (https://www.pathofexile.com/api/trade/data/static); image: web.poecdn.com CDN; exact unambiguous name (display only; prices remain separate)".into());
+        }
+    }
+}
+
+fn enrich_icons(lines: &mut [Line], metadata: &[Line]) {
+    let mut icons = BTreeMap::<&str, Vec<(&Line, String)>>::new();
+    let base = url::Url::parse("https://web.poecdn.com").expect("static CDN URL");
+    for item in metadata {
+        if let Some(icon) = item.icon.as_deref() {
+            if let Ok(url) = base.join(icon) {
+                if url.scheme() == "https"
+                    && url.host_str() == Some("web.poecdn.com")
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                {
+                    icons
+                        .entry(&item.name)
+                        .or_default()
+                        .push((item, url.to_string()));
+                }
+            }
+        }
+    }
+    for line in lines {
+        if line.icon.is_some() {
+            continue;
+        }
+        let Some(candidates) = icons.get(line.name.as_str()) else {
+            continue;
+        };
+        let provider_id = line.metadata.get("archive_item_id").and_then(Value::as_str);
+        let exact: Vec<_> = candidates
+            .iter()
+            .filter(|(candidate, _)| {
+                provider_id.is_some_and(|id| candidate.id.split(':').next() == Some(id))
+                    && compatible_icon_variant(line, candidate)
+            })
+            .collect();
+        let variant: Vec<_> = candidates
+            .iter()
+            .filter(|(candidate, _)| {
+                compatible_icon_variant(line, candidate)
+                    && icon_variant(line) == icon_variant(candidate)
+            })
+            .collect();
+        let selected = if !exact.is_empty() {
+            exact
+        } else if !variant.is_empty() {
+            variant
+        } else {
+            candidates
+                .iter()
+                .filter(|(candidate, _)| compatible_icon_variant(line, candidate))
+                .collect()
+        };
+        let unique: std::collections::BTreeSet<&str> =
+            selected.iter().map(|(_, icon)| icon.as_str()).collect();
+        if unique.len() == 1 {
+            line.icon = unique.first().map(|icon| (*icon).to_owned());
+            line.metadata.remove("icon_error");
+            line.metadata.insert("icon_source".into(),
+                "poe.ninja supported overview metadata; image: Grinding Gear Games web.poecdn.com CDN; exact name with provider ID/variant matching or unambiguous artwork fallback (display only; prices remain separate)".into());
+        }
+    }
+}
+
+fn icon_variant(line: &Line) -> String {
+    line.variant
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && !part.ends_with(" links"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn compatible_icon_variant(archive: &Line, candidate: &Line) -> bool {
+    archive
+        .base_type
+        .as_ref()
+        .zip(candidate.base_type.as_ref())
+        .is_none_or(|(a, b)| a == b)
+        && archive
+            .gem_level
+            .zip(candidate.gem_level)
+            .is_none_or(|(a, b)| a == b)
+        && archive
+            .gem_quality
+            .zip(candidate.gem_quality)
+            .is_none_or(|(a, b)| a == b)
+        && archive
+            .corrupted
+            .zip(candidate.corrupted)
+            .is_none_or(|(a, b)| a == b)
 }
 
 pub(crate) async fn raw_overview(
@@ -854,6 +1111,146 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn historical_emblem_icons_use_catalog_entries_without_live_prices() {
+        let names = [
+            "Unrelenting Timeless Karui Emblem",
+            "Unrelenting Timeless Maraketh Emblem",
+            "Unrelenting Timeless Eternal Emblem",
+            "Unrelenting Timeless Templar Emblem",
+            "Unrelenting Timeless Vaal Emblem",
+        ];
+        let body = json!({
+            "lines": [],
+            "currencyDetails": names.iter().enumerate().map(|(index, name)| json!({
+                "id": index,
+                "name": name,
+                "icon": format!("https://web.poecdn.com/gen/image/emblem{index}.png")
+            })).collect::<Vec<_>>()
+        });
+        let live = normalize(
+            &OverviewQuery {
+                league: "Standard".into(),
+                category: "Fragment".into(),
+                source: "stash".into(),
+                date: None,
+            },
+            &body,
+            "2026-07-20T00:00:00Z".into(),
+        )
+        .unwrap();
+        assert!(
+            live.lines.is_empty(),
+            "Icon-only catalog entries must not become price rows"
+        );
+        let metadata = currency_icon_metadata(&body).unwrap();
+        assert_eq!(metadata.len(), 5);
+        assert!(metadata.iter().all(|line| line.price.is_none()));
+        let mut lines: Vec<Line> = names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| Line {
+                id: format!("archive:{index}"),
+                name: name.into(),
+                price: Some("45".into()),
+                metadata: BTreeMap::from([("icon_error".into(), "prior error".into())]),
+                ..Line::default()
+            })
+            .collect();
+        enrich_icons(&mut lines, &metadata);
+        for (index, line) in lines.iter().enumerate() {
+            assert_eq!(line.id, format!("archive:{index}"));
+            assert_eq!(line.name, names[index]);
+            assert_eq!(line.price.as_deref(), Some("45"));
+            assert_eq!(
+                line.icon.as_deref(),
+                Some(format!("https://web.poecdn.com/gen/image/emblem{index}.png").as_str())
+            );
+            assert!(!line.metadata.contains_key("icon_error"));
+        }
+        assert!(currency_icon_metadata(&json!({"lines":[]})).is_err());
+        assert!(currency_icon_metadata(&json!({"currencyDetails":null})).is_err());
+        assert!(
+            currency_icon_metadata(&json!({"currencyDetails":[{"id":"invalid","name":"Emblem"}]}))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn official_trade_icons_fill_exact_unambiguous_names_from_cached_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = market_store::SqliteStore::connect(directory.path().join("icons.sqlite3"))
+            .await
+            .unwrap();
+        let (selection, _) = watch::channel(None);
+        let state = ServiceState::new(store, "test/0.1", selection);
+        let metadata: TradeStatic = serde_json::from_value(json!({
+            "result": [{"id":"currency","entries":[
+                {"text":"Lonely Reliquary Key","image":"/gen/image/lonely.png"},
+                {"text":"Lonely Reliquary Key","image":"https://web.poecdn.com/gen/image/lonely.png"},
+                {"text":"Cosmic Reliquary Key","image":"/gen/image/cosmic.png"},
+                {"text":"Ambiguous Key","image":"/gen/image/a.png"},
+                {"text":"Ambiguous Key","image":"/gen/image/b.png"},
+                {"text":"Unsafe Key","image":"https://untrusted.example/key.png"},
+                {"text":"Unsafe Key","image":"https://user@web.poecdn.com/key.png"},
+                {"text":"Unsafe Key","image":"http://web.poecdn.com/key.png"},
+                {"text":"Missing Key"},
+                {"text":"Variant Key","image":"/gen/image/variant.png"}
+            ]}]
+        })).unwrap();
+        *state.economy.trade_icons.lock().await = Some((Instant::now(), metadata));
+        let mut lines: Vec<Line> = [
+            "Lonely Reliquary Key",
+            "Cosmic Reliquary Key",
+            "Ambiguous Key",
+            "Unsafe Key",
+            "Missing Key",
+            "Absent Key",
+            "Variant Key",
+            "lonely reliquary key",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| Line {
+            id: format!("archive:{index}"),
+            name: name.into(),
+            price: Some("25".into()),
+            ..Line::default()
+        })
+        .collect();
+        lines[0]
+            .metadata
+            .insert("icon_error".into(), "prior error".into());
+        lines[1].icon = Some("https://web.poecdn.com/existing.png".into());
+        lines[6].variant = Some("Special".into());
+        let original = lines.clone();
+        trade_icons(&state, &mut lines).await.unwrap();
+        assert_eq!(
+            lines[0].icon.as_deref(),
+            Some("https://web.poecdn.com/gen/image/lonely.png")
+        );
+        assert!(
+            lines[0].metadata["icon_source"]
+                .as_str()
+                .unwrap()
+                .contains("official trade")
+        );
+        assert!(!lines[0].metadata.contains_key("icon_error"));
+        assert_eq!(
+            serde_json::to_value(&lines[1]).unwrap(),
+            serde_json::to_value(&original[1]).unwrap()
+        );
+        assert!(lines[2..].iter().all(|line| line.icon.is_none()));
+        for (line, mut expected) in lines.into_iter().zip(original) {
+            expected.icon = line.icon.clone();
+            expected.metadata = line.metadata.clone();
+            assert_eq!(
+                serde_json::to_value(line).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn exchange_rates_are_inverted_to_quote_units_and_metadata_resolves() {
         let query = OverviewQuery {
             league: "Standard".into(),
@@ -872,6 +1269,105 @@ mod tests {
         assert_eq!(overview.lines[0].price.as_deref(), Some("1.25"));
         assert_eq!(overview.lines[0].sparkline[1], None);
         assert!(normalize(&query, &json!({"lines":[]}), String::new()).is_err());
+    }
+
+    #[test]
+    fn historical_icons_require_unambiguous_metadata_and_do_not_change_price_identity() {
+        let mut lines = vec![Line {
+            id: "archive:a".into(),
+            name: "Fireball".into(),
+            price: Some("12".into()),
+            ..Line::default()
+        }];
+        let mut metadata = vec![Line {
+            name: "Fireball".into(),
+            icon: Some("/gen/image/fire.png".into()),
+            ..Line::default()
+        }];
+        enrich_icons(&mut lines, &metadata);
+        assert_eq!(
+            lines[0].icon.as_deref(),
+            Some("https://web.poecdn.com/gen/image/fire.png")
+        );
+        assert_eq!(lines[0].id, "archive:a");
+        assert_eq!(lines[0].price.as_deref(), Some("12"));
+        assert!(lines[0].metadata.contains_key("icon_source"));
+        lines[0].icon = None;
+        metadata.push(Line {
+            name: "Fireball".into(),
+            icon: Some("/gen/image/other.png".into()),
+            ..Line::default()
+        });
+        enrich_icons(&mut lines, &metadata);
+        assert!(lines[0].icon.is_none());
+    }
+
+    #[test]
+    fn historical_icons_match_saved_variants_instead_of_rejecting_all_artwork() {
+        let mut lines = vec![
+            Line {
+                name: "Map (Tier 16)".into(),
+                variant: Some(", Gen-24, 1-4 links".into()),
+                ..Line::default()
+            },
+            Line {
+                name: "Phantom Boots".into(),
+                variant: Some("Elder/Hunter".into()),
+                ..Line::default()
+            },
+            Line {
+                name: "Storm Call".into(),
+                variant: Some("20/20".into()),
+                gem_level: Some(20),
+                metadata: BTreeMap::from([("archive_item_id".into(), "4476".into())]),
+                ..Line::default()
+            },
+        ];
+        let metadata = vec![
+            Line {
+                name: "Map (Tier 16)".into(),
+                variant: Some("Gen-24".into()),
+                icon: Some("/map24.png".into()),
+                ..Line::default()
+            },
+            Line {
+                name: "Map (Tier 16)".into(),
+                variant: Some("Gen-23".into()),
+                icon: Some("/map23.png".into()),
+                ..Line::default()
+            },
+            Line {
+                name: "Phantom Boots".into(),
+                variant: Some("Elder/Hunter".into()),
+                icon: Some("/boots.png".into()),
+                ..Line::default()
+            },
+            Line {
+                name: "Phantom Boots".into(),
+                icon: Some("/eldritch-boots.png".into()),
+                ..Line::default()
+            },
+            Line {
+                id: "4476:variant".into(),
+                name: "Storm Call".into(),
+                variant: Some("20/20".into()),
+                gem_level: Some(20),
+                icon: Some("/storm.png".into()),
+                ..Line::default()
+            },
+            Line {
+                id: "99:variant".into(),
+                name: "Storm Call".into(),
+                variant: Some("20/20".into()),
+                gem_level: Some(20),
+                icon: Some("/imbued-storm.png".into()),
+                ..Line::default()
+            },
+        ];
+        enrich_icons(&mut lines, &metadata);
+        assert!(lines[0].icon.as_deref().unwrap().ends_with("/map24.png"));
+        assert!(lines[1].icon.as_deref().unwrap().ends_with("/boots.png"));
+        assert!(lines[2].icon.as_deref().unwrap().ends_with("/storm.png"));
     }
 
     #[test]

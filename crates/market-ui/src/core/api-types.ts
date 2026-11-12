@@ -145,6 +145,7 @@ export interface EconomyHistoryPoint {
   price: string;
   currency: string;
   granularity: 'daily' | 'snapshot';
+  volume?: string | null;
 }
 
 export interface EconomyHistory {

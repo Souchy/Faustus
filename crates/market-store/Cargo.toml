@@ -11,6 +11,7 @@ chrono.workspace = true
 faustus-fetch = { path = "../faustus-fetch" }
 market-core = { path = "../market-core" }
 serde_json.workspace = true
+rust_decimal.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
