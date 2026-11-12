@@ -42,6 +42,7 @@ export function exchangePrice(
 }
 
 export interface GemAnalysisInputs {
+  historical?: boolean;
   gcpPrice: number | null;
   vaalPrice: number | null;
   lensPrice: number | null;
@@ -60,8 +61,9 @@ export interface GemOpportunity {
   materialCost: number;
   profit: number;
   roiPercent: number;
-  sourceListings: number;
-  targetListings: number;
+  sourceListings: number | null;
+  targetListings: number | null;
+  unknownConfidence?: boolean;
   lowConfidence: boolean;
   corruptionOutcomes?: CorruptionOutcome[];
 }
@@ -168,11 +170,12 @@ export function opportunities(
       sourcePrice, targetPrice, materialCost, profit: targetPrice - totalCost,
       maxValue: corruptionOutcomes ? Math.max(...corruptionOutcomes.map((outcome) => outcome.price)) : targetPrice,
       roiPercent: (targetPrice / totalCost - 1) * 100,
-      sourceListings: source.listing_count ?? 0,
-      targetListings: corruptionOutcomes
+      sourceListings: inputs.historical ? null : source.listing_count ?? 0,
+      targetListings: inputs.historical ? null : corruptionOutcomes
         ? Math.min(...outcomeVariants.map((gem) => gem.listing_count ?? 0)) : target.listing_count ?? 0,
-      lowConfidence: lowConfidence(source, inputs.confidenceThreshold)
-        || (corruptionOutcomes ? outcomeVariants : [target]).some((gem) => lowConfidence(gem, inputs.confidenceThreshold)),
+      unknownConfidence: inputs.historical === true,
+      lowConfidence: !inputs.historical && (lowConfidence(source, inputs.confidenceThreshold)
+        || (corruptionOutcomes ? outcomeVariants : [target]).some((gem) => lowConfidence(gem, inputs.confidenceThreshold))),
       corruptionOutcomes,
     });
   }
@@ -187,8 +190,8 @@ export function filterAndSort(
   return rows.filter((row) => row.name.toLowerCase().includes(query)
     && (includeLowConfidence || !row.lowConfidence) && types.includes(row.gemType))
     .sort((a, b) => {
-      const left = column === 'listings' ? a.sourceListings + a.targetListings : a[column];
-      const right = column === 'listings' ? b.sourceListings + b.targetListings : b[column];
+      const left = column === 'listings' ? (a.sourceListings ?? 0) + (a.targetListings ?? 0) : a[column];
+      const right = column === 'listings' ? (b.sourceListings ?? 0) + (b.targetListings ?? 0) : b[column];
       const order = left < right ? -1 : left > right ? 1 : 0;
       return ascending ? order : -order;
     }).slice(0, 100);

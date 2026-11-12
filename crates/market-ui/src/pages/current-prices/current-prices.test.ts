@@ -1,23 +1,119 @@
 import { DI, Registration } from 'aurelia';
 import { describe, expect, it, vi } from 'vitest';
 import { MarketApi } from '../../core/market-api';
-import { economyCategories, economyLine, economyOverview } from '../../testing/fixtures';
+import { economyCategories, economyLine, economyOverview, gemAnalysis } from '../../testing/fixtures';
 import type { EconomyHistory } from '../../core/api-types';
-import { EconomyWorkspace } from './economy-workspace';
+import { CurrentPrices } from './current-prices';
 
 function workspace() {
   const api = new MarketApi('');
   vi.spyOn(api, 'economyDates').mockResolvedValue(['2026-07-16', '2026-06-25']);
   vi.spyOn(api, 'economy').mockImplementation(async (league, category, source, date) =>
     economyOverview(category, source, league, date));
-  const app = DI.createContainer().register(Registration.instance(MarketApi, api)).invoke(EconomyWorkspace);
+  const container = DI.createContainer().register(Registration.instance(MarketApi, api));
+  const app = container.invoke(CurrentPrices);
   app.categories = economyCategories();
   app.leagues = [{ id: 'Standard', name: 'Standard', live: true }, { id: 'Ancestors', name: 'Ancestors', live: true, archived: true }];
   app.league = 'Standard';
-  return { app, api };
+  return { app, api, container };
 }
 
-describe('economy workspace state', () => {
+describe('Current prices page', () => {
+  it('refreshes the saved gem feed as well as current prices and invalidates cached gem data', async () => {
+    const { app, api } = workspace();
+    const capture = vi.spyOn(api, 'refreshGemAnalysis').mockResolvedValue(gemAnalysis());
+    await app.refresh();
+    expect(capture).toHaveBeenCalledWith('Standard', expect.any(AbortSignal));
+    expect(app.session.gemRevision).toBe(1);
+    expect(api.economy).toHaveBeenCalledWith('Standard', 'Currency', 'exchange', '', expect.any(AbortSignal), true);
+    expect(app.overview).not.toBeNull();
+    expect(app.isLoading).toBe(false);
+  });
+
+  it('shows snapshot-refresh failures while still refreshing current prices', async () => {
+    const { app, api } = workspace();
+    vi.spyOn(api, 'refreshGemAnalysis').mockRejectedValue(new Error('HTTP 502'));
+    await app.refresh();
+    expect(app.session.error).toContain('HTTP 502');
+    expect(app.session.gemRevision).toBe(0);
+    expect(app.overview).not.toBeNull();
+    expect(app.isLoading).toBe(false);
+  });
+
+  it('does not apply an off-page snapshot refresh after the route unloads', async () => {
+    const { app, api } = workspace();
+    let finishRefresh: ((analysis: ReturnType<typeof gemAnalysis>) => void) | undefined;
+    vi.spyOn(api, 'refreshGemAnalysis').mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
+    const refresh = app.refresh();
+    app.unbinding();
+    finishRefresh?.(gemAnalysis());
+    await refresh;
+    expect(api.economy).not.toHaveBeenCalled();
+    expect(app.session.gemRevision).toBe(0);
+    expect(app.session.error).toBe('');
+    expect(app.isLoading).toBe(false);
+  });
+
+  it('restores page data into a new route instance without restoring transient view state', () => {
+    const { app, container } = workspace();
+    app.loading();
+    app.overview = economyOverview();
+    app.search = 'Divine';
+    app.updateLines();
+    app.selectedItem = economyLine();
+    app.history = {
+      points: [15, 16, 17].map((day) => ({
+        date: `2026-07-${day}`, price: '1', currency: 'Chaos Orb', granularity: 'daily',
+      })),
+      coverage: { start: null, end: null },
+    };
+    app.setPeriodRange(1, 2);
+    app.isLoading = app.historyLoading = true;
+    app.unbinding();
+    expect(app.session.prices).toBeNull();
+    const restored = container.invoke(CurrentPrices);
+    expect(restored).not.toBe(app);
+    expect(restored.search).toBe('Divine');
+    expect(restored.selectedItem).toEqual(app.selectedItem);
+    expect(restored.history).toEqual(app.history);
+    expect([restored.periodStart, restored.periodEnd]).toEqual([1, 2]);
+    expect(restored.isLoading || restored.historyLoading).toBe(false);
+    expect(restored.hoveredPoint).toBeNull();
+  });
+
+  it('clears dataset-specific filters but retains the custom period when a dataset changes off-page', () => {
+    const { app, container } = workspace();
+    app.search = 'Divine';
+    app.selectedItem = economyLine();
+    app.history = {
+      points: [15, 16, 17].map((day) => ({
+        date: `2026-07-${day}`, price: '1', currency: 'Chaos Orb', granularity: 'daily',
+      })),
+      coverage: { start: null, end: null },
+    };
+    app.setPeriodRange(1, 2);
+    app.unbinding();
+    app.session.historicalLeague = 'Ancestors';
+    const restored = container.invoke(CurrentPrices);
+    expect(restored.search).toBe('');
+    expect(restored.selectedItem).toBeNull();
+    expect(restored.snapshot().values.customPeriod).toEqual(app.snapshot().values.customPeriod);
+  });
+
+  it('ignores a late price response after its route has unloaded', async () => {
+    const { app, api } = workspace();
+    let finishDates: ((dates: string[]) => void) | undefined;
+    vi.mocked(api.economyDates).mockImplementationOnce(() => new Promise((resolve) => { finishDates = resolve; }));
+    const loading = app.load();
+    app.unbinding();
+    finishDates?.(['2026-07-16']);
+    await loading;
+    expect(api.economy).not.toHaveBeenCalled();
+    expect(app.overview).toBeNull();
+    expect(app.isLoading).toBe(false);
+    expect(app.date).toBe('');
+  });
+
   it('retains custom dates across items, leagues, unavailable history and temporary clamping', async () => {
     const { app, api } = workspace();
     const history = (days: number[], month = '01'): EconomyHistory => ({

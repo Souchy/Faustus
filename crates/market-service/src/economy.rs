@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -248,6 +248,17 @@ async fn historical_overview(
         .historical_economy(&query.league, &query.category, &query.source, date)
         .await
         .map_err(failure)?;
+    if matches!(query.category.as_str(), "SkillGem" | "ImbuedGem") {
+        for line in &mut overview.lines {
+            if let Some((level, quality, corrupted)) =
+                line.variant.as_deref().and_then(imports::gem_variant)
+            {
+                line.gem_level = Some(level);
+                line.gem_quality = Some(quality);
+                line.corrupted = Some(corrupted);
+            }
+        }
+    }
     let mut metadata = state
         .economy_store
         .economy_icon_metadata(&query.category)
@@ -631,7 +642,7 @@ pub async fn archive_catalog(
     refresh: bool,
 ) -> Result<Vec<Archive>, ApiError> {
     let cached = state.economy.catalog.read().await.clone();
-    let mut result = if let Some((checked, entries)) =
+    let result = if let Some((checked, entries)) =
         cached.filter(|(checked, _)| !refresh && checked.elapsed() < Duration::from_secs(900))
     {
         let _ = checked;
@@ -680,19 +691,25 @@ pub async fn archive_catalog(
             .replace((Instant::now(), entries.clone()));
         entries
     };
-    for saved in state
+    let saved = state
         .economy_store
         .economy_imports()
         .await
-        .map_err(failure)?
-    {
+        .map_err(failure)?;
+    Ok(merge_archive_catalog(result, saved))
+}
+
+fn merge_archive_catalog(mut result: Vec<Archive>, saved: Vec<Archive>) -> Vec<Archive> {
+    let mut names = HashSet::new();
+    result.retain(|entry| names.insert(entry.name.clone()));
+    for saved in saved {
         if let Some(entry) = result.iter_mut().find(|entry| entry.name == saved.name) {
             *entry = saved;
         } else {
             result.push(saved);
         }
     }
-    Ok(result)
+    result
 }
 
 #[derive(Deserialize)]
@@ -1109,6 +1126,92 @@ fn normalize(query: &OverviewQuery, body: &Value, fetched_at: String) -> Result<
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn archive_catalog_lists_each_import_identity_once_with_saved_status() {
+        let archive = |name: &str, status: &str, rows: u64| Archive {
+            name: name.into(),
+            status: status.into(),
+            rows,
+            skipped: 0,
+            error: None,
+            start: None,
+            end: None,
+            league: None,
+            progress: String::new(),
+            license: "CC BY-SA (poe.ninja)".into(),
+            url: imports::download_url(name),
+        };
+        let result = merge_archive_catalog(
+            vec![
+                archive("Allflame", "available", 0),
+                archive("Allflame", "available", 0),
+                archive("Ancestors", "available", 0),
+                archive("Ancestors", "available", 0),
+                archive("Ancestors", "available", 0),
+                archive("Mirage", "available", 0),
+            ],
+            vec![
+                archive("Ancestors", "completed", 42),
+                archive("Ancestors", "completed", 42),
+                archive("Keepers", "failed", 0),
+            ],
+        );
+        assert_eq!(
+            result.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            ["Allflame", "Ancestors", "Mirage", "Keepers"]
+        );
+        assert_eq!(result[0].status, "available");
+        assert_eq!(result[1].status, "completed");
+        assert_eq!(result[1].rows, 42);
+        assert_eq!(result[3].status, "failed");
+    }
+
+    #[tokio::test]
+    async fn existing_archives_recover_level_only_variants_without_reimporting() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = market_store::SqliteStore::connect(directory.path().join("gems.sqlite3"))
+            .await
+            .unwrap();
+        store
+            .save_economy(&Overview {
+                league: "Old".into(),
+                category: "SkillGem".into(),
+                source: "stash".into(),
+                fetched_at: "2026-01-01".into(),
+                quote_currency: "Chaos Orb".into(),
+                rates: BTreeMap::new(),
+                lines: vec![Line {
+                    id: "archive:original".into(),
+                    name: "Fireball".into(),
+                    variant: Some("21c".into()),
+                    price: Some("30".into()),
+                    icon: Some("https://web.poecdn.com/fireball.png".into()),
+                    ..Line::default()
+                }],
+            })
+            .await
+            .unwrap();
+        let (selection, _) = watch::channel(None);
+        let state = ServiceState::new(store, "test/0.1", selection);
+        let overview = historical_overview(
+            &state,
+            &OverviewQuery {
+                league: "Old".into(),
+                category: "SkillGem".into(),
+                source: "stash".into(),
+                date: None,
+            },
+            "2026-01-01",
+        )
+        .await
+        .unwrap();
+        assert_eq!(overview.lines[0].id, "archive:original");
+        assert_eq!(overview.lines[0].price.as_deref(), Some("30"));
+        assert_eq!(overview.lines[0].gem_level, Some(21));
+        assert_eq!(overview.lines[0].gem_quality, Some(0));
+        assert_eq!(overview.lines[0].corrupted, Some(true));
+    }
 
     #[test]
     fn historical_emblem_icons_use_catalog_entries_without_live_prices() {

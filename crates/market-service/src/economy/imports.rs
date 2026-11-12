@@ -411,11 +411,9 @@ fn observation<'a>(
             }
         }
         if matches!(category.as_str(), "SkillGem" | "ImbuedGem") {
-            let variant = get("Variant");
-            let corrupted = variant.ends_with('c');
-            if let Some((level, quality)) = variant.trim_end_matches('c').split_once('/') {
-                line.gem_level = level.parse().ok();
-                line.gem_quality = quality.parse().ok();
+            if let Some((level, quality, corrupted)) = gem_variant(get("Variant")) {
+                line.gem_level = Some(level);
+                line.gem_quality = Some(quality);
                 line.corrupted = Some(corrupted);
             }
         }
@@ -442,6 +440,15 @@ fn observation<'a>(
     })
 }
 
+pub(super) fn gem_variant(variant: &str) -> Option<(u64, u64, bool)> {
+    let corrupted = variant.ends_with('c');
+    let variant = variant.strip_suffix('c').unwrap_or(variant);
+    let (level, quality) = variant.split_once('/').unwrap_or((variant, "0"));
+    let level = level.parse().ok()?;
+    let quality = quality.parse().ok()?;
+    (level > 0).then_some((level, quality, corrupted))
+}
+
 fn nonempty(value: &str) -> Option<String> {
     if value.is_empty() {
         None
@@ -453,6 +460,18 @@ fn nonempty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gem_variants_decode_level_only_zero_quality_and_corruption() {
+        assert_eq!(gem_variant("1"), Some((1, 0, false)));
+        assert_eq!(gem_variant("20"), Some((20, 0, false)));
+        assert_eq!(gem_variant("21c"), Some((21, 0, true)));
+        assert_eq!(gem_variant("20/20"), Some((20, 20, false)));
+        assert_eq!(gem_variant("20/23c"), Some((20, 23, true)));
+        for invalid in ["", "c", "0", "20/invalid", "20/20cc", "20/20/20"] {
+            assert!(gem_variant(invalid).is_none());
+        }
+    }
 
     fn archive_entry() -> Archive {
         Archive {

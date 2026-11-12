@@ -15,6 +15,7 @@
     "app": "tauri -- dev"
   },
   "dependencies": {
+    "@aurelia/router": "2.0.0-rc.2",
     "aurelia": "2.0.0-rc.2"
   },
   "devDependencies": {

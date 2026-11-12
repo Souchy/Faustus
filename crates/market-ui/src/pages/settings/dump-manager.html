@@ -1,0 +1,24 @@
+<section class="data-manager" aria-label="Historical data manager">
+  <div class="toolbar">
+    <div><h2>Historical datasets</h2><p class="muted">poe.ninja dumps · CC BY-SA · Daily prices · Softcore challenge leagues only</p></div>
+    <button click.trigger="loadArchives(true)" disabled.bind="archiveLoading">Discover dumps</button>
+  </div>
+  <p class="muted">Import and manage saved datasets here. Use League / dataset and As of in the header to browse their prices.</p>
+  <p if.bind="!allflameAvailable && !archiveLoading" class="muted">Allflame has not been published in the catalog yet. Discover dumps again once it is available.</p>
+  <p if.bind="archiveError" class="error" role="alert">${archiveError}</p>
+  <p if.bind="notice" role="status">${notice}</p>
+  <p if.bind="archiveLoading && !archives.length" role="status">Loading published archives...</p>
+  <div class="archive-list">
+    <article repeat.for="archive of archives" class="archive-entry">
+      <div><strong>${archive.name}</strong> <span class="muted">${seeds.includes(archive.name) ? 'Initial selection' : ''}</span>
+        <p>${archive.status} · ${format(archive.rows)} observations${archive.skipped ? ' · ' + format(archive.skipped) + ' excluded' : ''}</p>
+        <p class="muted">${archive.progress}</p>
+        <p if.bind="archive.start">${archive.start} – ${archive.end}</p>
+        <p if.bind="archive.error" class="error" role="alert">${archive.error}</p>
+      </div>
+      <button if.bind="archive.status === 'available' || archive.status === 'failed'"
+        disabled.bind="!!importing" click.trigger="importArchive(archive.name)">${archive.status === 'failed' ? 'Retry' : 'Import'} ${archive.name}</button>
+      <button if.bind="archive.status === 'completed'" click.trigger="browseArchive(archive)">Browse ${archive.name}</button>
+    </article>
+  </div>
+</section>

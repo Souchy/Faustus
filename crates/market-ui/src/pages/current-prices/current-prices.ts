@@ -1,32 +1,35 @@
-import { CustomElement, resolve } from 'aurelia';
+import { resolve } from 'aurelia';
 import type {
-  EconomyArchive, EconomyCategory, EconomyHistory, EconomyLeague, EconomyLine, EconomyOverview, EconomySource,
+  EconomyCategory, EconomyHistory, EconomyLeague, EconomyLine, EconomyOverview, EconomySource,
 } from '../../core/api-types';
 import { MarketApi } from '../../core/market-api';
+import { MarketSession } from '../../services/market-session';
 import {
   formatNumber, historyDate, historySeries, metadataText, number, quotedPrice, sortedLines, sparkSegments, variantLabel,
   type ChartPoint, type ChartSeries, type EconomySort, type PriceUnit,
 } from '../../core/economy';
-import template from './economy-workspace.html?raw';
 
-export class EconomyWorkspace {
+export class CurrentPrices {
   private readonly api = resolve(MarketApi);
+  readonly session = resolve(MarketSession);
   private request: AbortController | null = null;
   private detailRequest: AbortController | null = null;
-  private archiveRequest: AbortController | null = null;
-  private poll: ReturnType<typeof setTimeout> | null = null;
   private active = false;
-  league = '';
-  refreshToken = 0;
+  private loadedContext = '';
+  get league(): string { return this.session.selectedLeagueId; }
+  set league(value: string) { this.session.selectedLeagueId = value; }
   categories: EconomyCategory[] = [];
-  leagues: EconomyLeague[] = [];
+  get leagues(): EconomyLeague[] { return this.session.datasets; }
+  set leagues(value: EconomyLeague[]) { this.session.datasets = value; }
   category = 'Currency';
   source: EconomySource = 'exchange';
-  dataset = '';
-  date = '';
+  get dataset(): string { return this.session.historicalLeague; }
+  set dataset(value: string) { this.session.historicalLeague = value; }
+  get date(): string { return this.session.historicalDate; }
+  set date(value: string) { this.session.historicalDate = value; }
   dates: string[] = [];
   overview: EconomyOverview | null = null;
-  loading = false;
+  isLoading = false;
   error = '';
   dateError = '';
   search = '';
@@ -55,13 +58,6 @@ export class EconomyWorkspace {
   hoveredPoint: ChartPoint | null = null;
   private customPeriod: { start: number; end: number } | null = null;
   private dragging: { edge: 'start' | 'end' | 'range'; anchor: number; pointerId: number } | null = null;
-  managerOpen = false;
-  archives: EconomyArchive[] = [];
-  archiveLoading = false;
-  archiveError = '';
-  importing = '';
-  notice = '';
-  readonly seeds = ['Ancestors', 'Mirage', 'Phrecia 2.0', 'Keepers', 'Mercenaries'];
   readonly columns: { id: EconomySort; label: string }[] = [
     { id: 'name', label: 'Name' }, { id: 'price', label: 'Value' }, { id: 'change', label: 'Recent trend' },
   ];
@@ -73,28 +69,59 @@ export class EconomyWorkspace {
     return segments.map((segment) => `M${segment.replaceAll(' ', ' L')}${segment.includes(' ') ? '' : ' h0.1'}`).join(' ');
   }
 
+  constructor() {
+    const saved = this.session.priceState;
+    if (saved) {
+      Object.assign(this, saved.values);
+      if (saved.dataset !== this.browsingLeague) {
+        this.clearFilters();
+        this.closeDetail();
+      }
+    }
+  }
+
+  loading(): void {
+    this.session.page = 'prices';
+    this.session.prices = this;
+  }
+
   attached(): void {
     this.active = true;
-    void this.initialize();
+    if (!this.overview || this.loadedContext !== this.contextKey) void this.initialize();
+    else if (this.selectedItem && !this.history && !this.historyError) void this.loadHistory();
   }
 
   unbinding(): void {
     this.active = false;
     this.request?.abort();
+    this.request = null;
     this.detailRequest?.abort();
-    this.archiveRequest?.abort();
-    if (this.poll) clearTimeout(this.poll);
+    this.detailRequest = null;
+    this.isLoading = false;
+    this.historyLoading = false;
+    this.dragging = null;
+    this.hoveredPoint = null;
+    this.session.priceState = this.snapshot();
+    if (this.session.prices === this) this.session.prices = null;
   }
 
-  leagueChanged(): void {
-    if (!this.active) return;
-    this.dataset = this.date = '';
-    this.closeDetail();
-    void this.load();
-  }
-
-  refreshTokenChanged(): void {
-    if (this.active) void this.load(true);
+  snapshot() {
+    return {
+      dataset: this.browsingLeague,
+      values: {
+        categories: this.categories, category: this.category, source: this.source,
+        dates: this.dates, overview: this.overview, loadedContext: this.loadedContext,
+        error: this.error, dateError: this.dateError,
+        search: this.search, unit: this.unit, itemType: this.itemType, corrupted: this.corrupted,
+        gemLevel: this.gemLevel, gemQuality: this.gemQuality, links: this.links,
+        mapTier: this.mapTier, minListings: this.minListings,
+        sortColumn: this.sortColumn, ascending: this.ascending, limit: this.limit,
+        filteredLines: this.filteredLines, rows: this.rows, selectedItem: this.selectedItem,
+        history: this.history, historyError: this.historyError, historyDays: this.historyDays,
+        historyLimit: this.historyLimit, periodStart: this.periodStart, periodEnd: this.periodEnd,
+        customPeriod: this.customPeriod,
+      },
+    };
   }
 
   private controller(): AbortController {
@@ -105,21 +132,22 @@ export class EconomyWorkspace {
   }
 
   async initialize(): Promise<void> {
+    await this.session.ensureLoaded();
+    if (!this.active) return;
     const request = this.controller();
-    this.loading = true;
+    this.isLoading = true;
     this.error = '';
     try {
-      [this.categories, this.leagues] = await Promise.all([
-        this.api.economyCategories(request.signal), this.api.economyLeagues(request.signal),
-      ]);
+      const categories = await this.api.economyCategories(request.signal);
       if (this.request !== request || !this.active) return;
+      this.categories = categories;
       if (!this.categories.length) throw new Error('No economy categories were returned.');
       if (!this.categories.some((category) => category.id === this.category)) this.category = this.categories[0]!.id;
       await this.load();
     } catch (error: unknown) {
       if (this.request === request && this.active) this.error = `Unable to load economy catalog: ${this.message(error)}`;
     } finally {
-      if (this.request === request) this.loading = false;
+      if (this.request === request) this.isLoading = false;
     }
   }
 
@@ -138,6 +166,7 @@ export class EconomyWorkspace {
   }
 
   get browsingLeague(): string { return this.dataset || this.league; }
+  private get contextKey(): string { return JSON.stringify([this.browsingLeague, this.category, this.source, this.date]); }
   get historical(): boolean {
     return !!this.date || !!this.dataset;
   }
@@ -314,15 +343,35 @@ export class EconomyWorkspace {
     })).filter(({ value }) => value !== '');
   }
 
+  async refresh(): Promise<void> {
+    if (!this.dataset) {
+      const request = this.controller();
+      this.isLoading = true;
+      this.session.error = '';
+      const timeout = setTimeout(() => request.abort(new Error('Market refresh request timed out.')), 60_000);
+      try {
+        await this.session.refreshGemSnapshot(request.signal);
+      } catch (error: unknown) {
+        if (this.request === request) {
+          this.session.error = `Unable to refresh market data: ${this.message(error)}. Check that the external market service is running and reachable.`;
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (this.request !== request) return;
+    }
+    await this.load(true);
+  }
+
   async load(refresh = false): Promise<void> {
-    if (!this.browsingLeague) { this.loading = false; return; }
+    if (!this.browsingLeague) { this.isLoading = false; return; }
     if (!this.categories.length) { await this.initialize(); return; }
     const request = this.controller();
     this.detailRequest?.abort();
     this.selectedItem = null;
     this.overview = null;
     this.updateLines();
-    this.loading = true;
+    this.isLoading = true;
     this.error = this.dateError = '';
     this.limit = 100;
     if (!this.availableSources.includes(this.source)) this.source = this.availableSources[0] ?? 'stash';
@@ -334,14 +383,15 @@ export class EconomyWorkspace {
       if (this.dataset && !dates.includes(this.date)) {
         this.date = dates[0] ?? '';
       }
+
       const overview = await this.api.economy(this.browsingLeague, this.category, this.source, this.date, request.signal,
         refresh && !this.historical);
-      if (this.request === request) { this.overview = overview; this.updateLines(); }
+      if (this.request === request) { this.overview = overview; this.loadedContext = this.contextKey; this.updateLines(); }
     } catch (error: unknown) {
       if (this.request === request) this.error = `Unable to load ${this.currentCategory?.name ?? this.category}: ${this.message(error)}`;
     } finally {
       clearTimeout(timeout);
-      if (this.request === request) this.loading = false;
+      if (this.request === request) this.isLoading = false;
     }
   }
 
@@ -358,15 +408,8 @@ export class EconomyWorkspace {
     this.limit = 100;
     this.updateLines();
   }
-  browseArchive(archive: EconomyArchive): void {
-    this.selectDataset(archive.league ?? archive.name);
-    void this.toggleManager();
-  }
   selectDataset(dataset: string): void {
     this.dataset = dataset;
-    this.date = '';
-    this.clearFilters();
-    void this.load();
   }
   selectSource(source: EconomySource): void {
     this.source = source;
@@ -433,50 +476,5 @@ export class EconomyWorkspace {
       if (this.detailRequest === request) this.historyLoading = false;
     }
   }
-  async toggleManager(): Promise<void> {
-    this.managerOpen = !this.managerOpen;
-    if (this.managerOpen) await this.loadArchives();
-    else {
-      this.archiveRequest?.abort();
-      if (this.poll) clearTimeout(this.poll);
-    }
-  }
-  async loadArchives(refresh = false): Promise<void> {
-    this.archiveRequest?.abort();
-    if (this.poll) clearTimeout(this.poll);
-    const request = new AbortController();
-    this.archiveRequest = request;
-    this.archiveLoading = true;
-    this.archiveError = '';
-    try {
-      const archives = await this.api.economyArchives(request.signal, refresh);
-      if (this.archiveRequest !== request) return;
-      this.archives = archives;
-      this.leagues = await this.api.economyLeagues(request.signal);
-      if (archives.some((archive) => ['queued', 'downloading', 'importing'].includes(archive.status))) {
-        this.poll = setTimeout(() => { if (this.active && this.managerOpen) void this.loadArchives(); }, 3000);
-      }
-    } catch (error: unknown) {
-      if (this.archiveRequest === request && !request.signal.aborted) this.archiveError = `Unable to load archive status: ${this.message(error)}`;
-    } finally {
-      if (this.archiveRequest === request) this.archiveLoading = false;
-    }
-  }
-  async importArchive(name: string): Promise<void> {
-    this.importing = name;
-    this.archiveError = this.notice = '';
-    const request = new AbortController();
-    try {
-      await this.api.importEconomyArchive(name, request.signal);
-      this.notice = `Import requested for ${name}. Only softcore challenge data will be imported.`;
-      await this.loadArchives();
-    } catch (error: unknown) {
-      this.archiveError = `Unable to import ${name}: ${this.message(error)}`;
-    } finally { this.importing = ''; }
-  }
-  get allflameAvailable(): boolean { return this.archives.some((archive) => archive.name === 'Allflame'); }
-  get seedArchives(): EconomyArchive[] { return this.archives.filter((archive) => this.seeds.includes(archive.name)); }
   private message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 }
-
-CustomElement.define({ name: 'economy-workspace', template, bindables: ['league', 'refreshToken'] }, EconomyWorkspace);

@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DI, Registration } from 'aurelia';
-import { MarketApp } from './market-app';
-import { MarketApi } from './core/market-api';
-import { gemTypes } from './core/gem-analysis';
-import { categorizedGemOverview, gemAnalysis, gemOverview, prices, status } from './testing/fixtures';
+import { GemFlipping } from './gem-flipping';
+import { MarketApi } from '../../core/market-api';
+import { gemTypes } from '../../core/gem-analysis';
+import { categorizedGemOverview, economyLine, economyOverview, gemAnalysis, gemOverview, prices, status } from '../../testing/fixtures';
 
 afterEach(() => vi.unstubAllGlobals());
 
-function createApp(): MarketApp {
-  return DI.createContainer().invoke(MarketApp);
+function createApp(): GemFlipping {
+  return DI.createContainer().invoke(GemFlipping);
 }
 
 function mockService(options: { priceFailure?: boolean; selected?: string | null; categorized?: boolean } = {}) {
@@ -34,7 +34,98 @@ function mockService(options: { priceFailure?: boolean; selected?: string | null
   return fetch;
 }
 
-describe('dashboard state', () => {
+describe('Gem flipping page', () => {
+  it('restores filters and a pinned snapshot into a new page without retaining DOM refs or loading flags', async () => {
+    mockService({ categorized: true });
+    const container = DI.createContainer();
+    const app = container.invoke(GemFlipping);
+    await app.loadDashboard();
+    app.setGemTypes(['Support']);
+    app.setSearch('Multistrike');
+    await app.selectGemSnapshot('1');
+    app.loading();
+    app.isLoading = app.gemLoading = true;
+    app.unbinding();
+    expect(app.session.gems).toBeNull();
+    const restored = container.invoke(GemFlipping);
+    expect(restored).not.toBe(app);
+    expect(restored.search).toBe('Multistrike');
+    expect(restored.selectedGemTypes).toEqual(['Support']);
+    expect(restored.selectedGemSnapshot).toBe('1');
+    expect(restored.rows).toEqual(app.rows);
+    expect(restored.isLoading || restored.gemLoading).toBe(false);
+    expect(restored.gemTypeDropdown).toBeNull();
+    expect(restored.tableScroll).toBeNull();
+  });
+
+  it('calculates archive opportunities with same-day materials and unknown rather than zero liquidity', async () => {
+    mockService();
+    const app = createApp();
+    await app.loadDashboard();
+    const api = new MarketApi('');
+    const dates = vi.spyOn(api, 'economyDates').mockResolvedValue(['2026-07-16', '2026-07-15']);
+    const economy = vi.spyOn(api, 'economy').mockImplementation(async (league, category, source, date) => ({
+      ...economyOverview(category, source, league, date),
+      lines: category === 'Currency' ? [
+        economyLine({ name: "Gemcutter's Prism", price: date === '2026-07-16' ? '3' : '5' }),
+        economyLine({ name: 'Vaal Orb', price: '4' }),
+      ] : gemOverview().gems.map((gem) => economyLine({
+        name: gem.name, price: gem.chaos_value, variant: gem.variant, gem_level: gem.gem_level,
+        gem_quality: gem.gem_quality, corrupted: gem.corrupted, listings: 999, samples: 999,
+      })),
+    }));
+    const historicalApp = DI.createContainer().register(Registration.instance(MarketApi, api)).invoke(GemFlipping);
+    historicalApp.selectedLeagueId = 'Standard';
+    historicalApp.gemPrices = prices();
+    historicalApp.session.page = 'gems';
+    await historicalApp.selectDataset('archive:Ancestors');
+    expect(dates).toHaveBeenCalledWith('Ancestors', 'SkillGem', 'stash', expect.anything());
+    expect(historicalApp.selectedLeagueId).toBe('Standard');
+    expect(historicalApp.historicalDate).toBe('2026-07-16');
+    expect(historicalApp.rows[0]).toMatchObject({
+      profit: 38, sourceListings: null, targetListings: null, unknownConfidence: true, lowConfidence: false, gemType: 'Unknown',
+    });
+    expect(historicalApp.gems?.gems.every((gem) => gem.sample_count === null && gem.listing_count === null)).toBe(true);
+    historicalApp.setStrategy('quality');
+    expect(historicalApp.gcpPrice).toBe(3);
+    expect(historicalApp.rows[0]?.materialCost).toBe(60);
+    historicalApp.historicalDate = '2026-07-15';
+    await historicalApp.loadHistoricalGems();
+    expect(historicalApp.gcpPrice).toBe(5);
+    expect(historicalApp.rows[0]?.materialCost).toBe(100);
+    expect(economy.mock.calls.every((call) => call[0] === 'Ancestors' && call[2] === 'stash' && !!call[3])).toBe(true);
+    economy.mockRejectedValueOnce(new Error('archive unavailable'));
+    await historicalApp.loadHistoricalGems();
+    expect(historicalApp.rows).toEqual([]);
+    expect(historicalApp.gemError).toContain('archive unavailable');
+    historicalApp.unbinding();
+    app.unbinding();
+  });
+
+  it('never substitutes current material prices when historical material retrieval fails', async () => {
+    const api = new MarketApi('');
+    vi.spyOn(api, 'economyDates').mockResolvedValue(['2026-07-16']);
+    vi.spyOn(api, 'economy').mockImplementation(async (league, category, source, date) => {
+      if (category === 'Currency') throw new Error('HTTP 502');
+      return { ...economyOverview(category, source, league, date), lines: gemOverview().gems.map((gem) => economyLine({
+        name: gem.name, price: gem.chaos_value, gem_level: gem.gem_level, gem_quality: gem.gem_quality, corrupted: gem.corrupted,
+      })) };
+    });
+    const app = DI.createContainer().register(Registration.instance(MarketApi, api)).invoke(GemFlipping);
+    app.gemPrices = prices();
+    app.historicalLeague = 'Ancestors';
+    await app.loadHistoricalGems();
+    expect(app.rows).toHaveLength(1);
+    expect(app.gemPriceError).toContain('HTTP 502');
+    expect(app.gcpPrice).toBeNull();
+    app.setStrategy('quality');
+    expect(app.rows).toHaveLength(0);
+    app.setMaterialPrice('gcp', '2');
+    expect(app.rows).toHaveLength(1);
+    expect(app.rows[0]?.materialCost).toBe(40);
+    app.unbinding();
+  });
+
   it('explicitly refreshes the latest snapshot without replacing a pinned historical instant', async () => {
     const fetch = mockService();
     const app = createApp();
@@ -117,8 +208,9 @@ describe('dashboard state', () => {
     const api = new MarketApi('');
     const leagues = vi.spyOn(api, 'leagues').mockResolvedValue([]);
     vi.spyOn(api, 'status').mockResolvedValue(status());
+    vi.spyOn(api, 'economyLeagues').mockResolvedValue([]);
     const container = DI.createContainer().register(Registration.instance(MarketApi, api));
-    const app = container.invoke(MarketApp);
+    const app = container.invoke(GemFlipping);
     await app.loadDashboard();
     expect(leagues).toHaveBeenCalledOnce();
     expect(app.error).toContain('no available leagues');
@@ -207,7 +299,7 @@ describe('dashboard state', () => {
     const app = createApp();
     await app.loadDashboard();
     expect(app.error).toBe('');
-    expect(app.loading).toBe(false);
+    expect(app.isLoading).toBe(false);
     expect(app.selectedLeagueId).toBe('Standard');
     expect(fetch).toHaveBeenCalledWith('/api/v1/selection', expect.objectContaining({ body: '{"id":"Standard"}' }));
     expect(app.rows[0]?.profit).toBe(38);
@@ -379,6 +471,6 @@ describe('dashboard state', () => {
     expect(app.error).toContain('external market service');
     expect(app.rows).toEqual([]);
     expect(app.prices).toBeNull();
-    expect(app.loading).toBe(false);
+    expect(app.isLoading).toBe(false);
   });
 });

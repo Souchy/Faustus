@@ -1,6 +1,5 @@
-<bindable name="model"></bindable>
-
-<section with.bind="model" aria-label="Gem flipping" class="page gems">
+<section aria-label="Gem flipping" class="page gems">
+  <p if.bind="historicalLeague" class="muted">Historical daily analysis · ${historicalLeague} · ${historicalDate}. Same-day Stash estimates, not executable trades. Listings, samples, gem types, liquidity and confidence are unknown; current prices are never substituted. Lens costs, when enabled, are manual assumptions. Corruption uses the current approximate model, not verified historical mechanics.</p>
   <div class="toolbar">
     <div class="strategy-list" aria-label="Gem strategies">
       <button repeat.for="item of strategies" class.bind="strategy === item.id ? 'active' : ''"
@@ -43,14 +42,7 @@
         </ul>
       </div>
     </details>
-    <label>As of
-      <select aria-label="Gem price instant" class="instant-picker" title="Snapshot times are local" value.bind="selectedGemSnapshot"
-        disabled.bind="loading || gemLoading" change.trigger="selectGemSnapshot($event.target.value)">
-        <option value="latest" title.bind="timestamp(latestGemFetchedAt)">${latestGemLabel}</option>
-        <option repeat.for="snapshot of gemSnapshots" value.bind="snapshot.id.toString()" title.bind="timestamp(snapshot.captured_at)">${snapshotLabel(snapshot.captured_at)}</option>
-      </select>
-    </label>
-    <div class="confidence-controls" role="group" aria-label="Confidence filter">
+    <div if.bind="!historicalLeague" class="confidence-controls" role="group" aria-label="Confidence filter">
       <label title="Include variants below the sample/listing minimum."><input type="checkbox" aria-label="Include low confidence"
         checked.to-view="includeLowConfidence" change.trigger="toggleConfidence()"> Low conf</label>
       <label title="Minimum samples and listings for both buy and sell variants.">Min
@@ -72,7 +64,7 @@
       </tr></thead>
       <tbody>
         <tr repeat.for="row of visibleRows">
-          <td><button class="gem-name" click.trigger="setSearch(row.name)">${row.name}</button><span if.bind="row.lowConfidence" class="confidence">LOW CONF</span></td>
+          <td><button class="gem-name" click.trigger="setSearch(row.name)">${row.name}</button><span if.bind="row.lowConfidence" class="confidence">LOW CONF</span><span if.bind="row.unknownConfidence" class="confidence">CONF UNKNOWN</span></td>
           <td>${row.gemType}</td>
           <td>${money(row.sourcePrice)}</td>
           <td repeat.for="metric of ['targetPrice', 'profit', 'roiPercent']"
@@ -104,7 +96,7 @@
             </div>
           </td>
           <td if.bind="strategy === 'corrupt'" title="Highest resale value among the modeled outcomes">${money(row.maxValue)}</td>
-          <td title.bind="row.corruptionOutcomes ? 'Buy / minimum listings across valued outcomes' : 'Buy / sell listings'">${row.sourceListings}/${row.targetListings}</td>
+          <td title.bind="row.unknownConfidence ? 'Historical listing counts unavailable' : row.corruptionOutcomes ? 'Buy / minimum listings across valued outcomes' : 'Buy / sell listings'">${row.sourceListings === null ? 'N/A' : row.sourceListings}/${row.targetListings === null ? 'N/A' : row.targetListings}</td>
         </tr>
       </tbody>
     </table>

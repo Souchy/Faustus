@@ -1,22 +1,35 @@
-<import from="./pages/current-prices/economy-workspace"></import>
-<import from="./pages/gem-flipping/gem-flipping.html"></import>
-
-<main pointerdown.trigger="closeGemTypesOutside($event)">
+<main pointerdown.trigger="gems?.closeGemTypesOutside($event)" browse-archive.trigger="browseArchive($event.detail)">
   <header class="app-header">
     <nav aria-label="Market pages">
-      <button class.bind="page === 'prices' ? 'active' : ''" aria-pressed.bind="page === 'prices'" click.trigger="setPage('prices')">Current prices</button>
-      <button class.bind="page === 'gems' ? 'active' : ''" aria-pressed.bind="page === 'gems'" click.trigger="setPage('gems')">Gem flipping</button>
+      <button class.bind="session.page === 'prices' ? 'active' : ''" aria-pressed.bind="session.page === 'prices'" click.trigger="router.load('/prices')">Current prices</button>
+      <button class.bind="session.page === 'gems' ? 'active' : ''" aria-pressed.bind="session.page === 'gems'" click.trigger="router.load('/gems')">Gem flipping</button>
     </nav>
-    <label class="league-picker">League
-      <select aria-label="League" value.bind="selectedLeagueId" change.trigger="loadDashboard($event.target.value)">
-        <option if.bind="!leagues.length" value="">Loading leagues...</option>
-        <option repeat.for="league of leagues" value.bind="league.id">${league.name}</option>
+    <label class="league-picker">League / dataset
+      <select aria-label="League" value.to-view="session.selectedDataset" change.trigger="selectDataset($event.target.value)">
+        <option if.bind="!session.leagues.length" value="">Loading leagues...</option>
+        <optgroup label="Live"><option repeat.for="league of session.leagues; key: id" value.bind="league.id">${league.name}</option></optgroup>
+        <optgroup label="Historical"><option repeat.for="entry of session.archivedDatasets; key: id" value.bind="'archive:' + entry.id">${entry.name} (saved history)</option></optgroup>
       </select>
     </label>
-    <button id="refresh" click.trigger="refresh()" disabled.bind="loading" title="Recheck current economy, gem and material prices; requests respect provider caches and refresh cooldowns.">${loading ? 'Loading...' : 'Refresh'}</button>
+    <label class="as-of-picker" show.bind="session.page !== 'settings'">As of
+      <select if.bind="session.page === 'prices' || session.historicalLeague" aria-label="As of"
+        disabled.bind="session.page === 'gems' ? gems?.gemLoading : prices?.isLoading" change.trigger="selectAsOfDate($event.target.value)">
+        <option if.bind="!session.historicalLeague" value="" selected.to-view="!session.historicalDate">Latest</option>
+        <option repeat.for="day of asOfDates" value.bind="day" selected.to-view="day === session.historicalDate">${day}</option>
+      </select>
+      <select if.bind="session.page === 'gems' && !session.historicalLeague && gems" aria-label="Gem price instant" class="instant-picker"
+        title="Snapshot times are local" value.bind="gems.selectedGemSnapshot" disabled.bind="gems.isLoading || gems.gemLoading"
+        change.trigger="gems.selectGemSnapshot($event.target.value)">
+        <option value="latest" title.bind="gems.timestamp(gems.latestGemFetchedAt)">${gems.latestGemLabel}</option>
+        <option repeat.for="snapshot of gems.gemSnapshots" value.bind="snapshot.id.toString()" title.bind="gems.timestamp(snapshot.captured_at)">${gems.snapshotLabel(snapshot.captured_at)}</option>
+      </select>
+    </label>
+    <button id="refresh" click.trigger="refresh()" disabled.bind="isLoading"
+      title.bind="session.page === 'settings' ? 'Refresh the published dataset catalog and local import statuses.' : 'Recheck current economy, gem and material prices; requests respect provider caches and refresh cooldowns.'">${isLoading ? 'Loading...' : 'Refresh'}</button>
+    <button class="settings-button" class.bind="session.page === 'settings' ? 'active' : ''" aria-label="Settings" title="Settings"
+      aria-pressed.bind="session.page === 'settings'" click.trigger="router.load('/settings')"><span aria-hidden="true">&#9881;</span></button>
   </header>
 
   <p if.bind="error" class="error banner" role="alert">${error}</p>
-  <economy-workspace show.bind="page === 'prices'" league.bind="selectedLeagueId" refresh-token.bind="economyRefreshToken"></economy-workspace>
-  <gem-flipping if.bind="page === 'gems'" model.bind="$this"></gem-flipping>
+  <au-viewport></au-viewport>
 </main>
