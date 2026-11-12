@@ -76,9 +76,13 @@ export function economyCategories(): EconomyCategory[] {
   return [
     { id: 'Currency', name: 'Currency', group: 'General', sources: ['exchange', 'stash'] },
     { id: 'Fragment', name: 'Fragments', group: 'General', sources: ['exchange', 'stash'] },
-    { id: 'SkillGem', name: 'Skill Gems', group: 'Equipment & Gems', sources: ['stash'] },
+    { id: 'SkillGem', name: 'Skill Gems', group: 'Items', sources: ['stash'] },
+    { id: 'Wombgift', name: 'Wombgifts', group: 'Items', sources: ['stash'] },
+    { id: 'Corpse', name: 'Corpses', group: 'Items', sources: ['stash'] },
+    { id: 'Incubator', name: 'Incubators', group: 'Items', sources: ['stash'] },
+    { id: 'UniqueWeapon', name: 'Unique Weapons', group: 'Uniques', sources: ['stash'] },
     { id: 'Map', name: 'Maps', group: 'Atlas', sources: ['stash'] },
-    { id: 'UniqueWeapon', name: 'Unique Weapons', group: 'Equipment & Gems', sources: ['stash'] },
+    { id: 'UniqueMap', name: 'Unique Maps', group: 'Atlas', sources: ['stash'] },
   ];
 }
 

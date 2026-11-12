@@ -103,6 +103,122 @@ test('economy categories, facets, source views, details and responsive layout', 
   expect(errors).toEqual([]);
 });
 
+test('economy groups separate items and unique equipment while keeping unique maps in Atlas', async ({ page }) => {
+  await service(page);
+  await page.goto('/');
+  const sidebar = page.getByRole('navigation', { name: 'Economy categories', exact: true });
+  const group = (name: string) => sidebar.locator('section').filter({
+    has: page.getByRole('heading', { name, exact: true, level: 2 }),
+  });
+  await expect(sidebar.getByRole('heading', { level: 2 })).toHaveText(['General', 'Items', 'Uniques', 'Atlas']);
+  await expect(group('General').getByRole('button')).toHaveText(['Currency', 'Fragments']);
+  await expect(group('Items').getByRole('button')).toHaveText(['Skill Gems', 'Wombgifts', 'Corpses', 'Incubators']);
+  await expect(group('Uniques').getByRole('button')).toHaveText(['Unique Weapons']);
+  await expect(group('Atlas').getByRole('button')).toHaveText(['Maps', 'Unique Maps']);
+  for (const name of ['Wombgifts', 'Corpses', 'Incubators', 'Unique Weapons', 'Unique Maps']) {
+    await sidebar.getByRole('button', { name, exact: true }).click();
+    await expect(page.getByRole('heading', { name, exact: true, level: 1 })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Stash', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Exchange', exact: true })).toHaveCount(0);
+  }
+  await page.setViewportSize({ width: 390, height: 800 });
+  const category = page.getByRole('combobox', { name: 'Economy category', exact: true });
+  await expect(category).toBeVisible();
+  await expect(category.locator('optgroup')).toHaveCount(4);
+  await expect(category.locator('optgroup[label="General"] option')).toHaveText(['Currency', 'Fragments']);
+  await expect(category.locator('optgroup[label="Items"] option')).toHaveText(['Skill Gems', 'Wombgifts', 'Corpses', 'Incubators']);
+  await expect(category.locator('optgroup[label="Uniques"] option')).toHaveText(['Unique Weapons']);
+  await expect(category.locator('optgroup[label="Atlas"] option')).toHaveText(['Maps', 'Unique Maps']);
+  await category.selectOption('Wombgift');
+  await expect(page.getByRole('heading', { name: 'Wombgifts', exact: true, level: 1 })).toBeVisible();
+});
+
+test('price captions are omitted and Clear filters only appears with category-specific filters', async ({ page }) => {
+  await service(page);
+  await page.goto('/');
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
+  const clear = page.getByRole('button', { name: 'Clear filters', exact: true });
+  await expect(clear).toHaveCount(0);
+  await page.getByRole('searchbox', { name: 'Search economy items', exact: true }).fill('Vaal');
+  await page.getByRole('combobox', { name: 'Price currency', exact: true }).selectOption('chaos');
+  await expect(clear).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('archive:Ancestors');
+  await expect(page.getByRole('combobox', { name: 'As of', exact: true })).toHaveValue('2026-07-16');
+  await expect(page.locator('.economy-count, .history-provenance')).toHaveCount(0);
+  await expect(page.getByText(/^Icons: poe.ninja item metadata/)).toHaveCount(0);
+  await expect(page.getByText(/Saved price history; volume and listing counts/)).toHaveCount(0);
+  await expect(clear).toHaveCount(0);
+  await page.locator('.economy-item').first().click();
+  await expect(page.getByRole('slider', { name: 'Period start', exact: true })).toBeVisible();
+  await expect(page.getByText(/^Native quote units\./)).toHaveCount(0);
+  await expect(page.getByText(/^Drag anywhere on the overview graph/)).toHaveCount(0);
+  await page.getByRole('navigation', { name: 'Item breadcrumb', exact: true })
+    .getByRole('button', { name: 'Currency', exact: true }).click();
+  await page.getByRole('button', { name: 'Skill Gems', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Gem level', exact: true }).selectOption('21');
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(1);
+  await clear.click();
+  await expect(page.getByRole('combobox', { name: 'Gem level', exact: true })).toHaveValue('');
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Maps', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Map tier', exact: true })).toBeVisible();
+  await expect(clear).toBeVisible();
+  await page.getByRole('button', { name: 'Unique Weapons', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Item type', exact: true })).toBeVisible();
+  await expect(clear).toBeVisible();
+  await page.route('**/api/v1/economy/overview?**', (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    const overview = economyOverview(query.get('category')!, 'stash', query.get('league')!);
+    overview.lines = overview.lines.map((line) => ({ ...line, listings: 12 }));
+    return route.fulfill({ json: overview });
+  });
+  await page.getByRole('button', { name: 'Currency', exact: true }).click();
+  await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('Standard');
+  await page.getByRole('textbox', { name: 'Minimum listings', exact: true }).fill('99');
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(0);
+  await clear.click();
+  await expect(page.getByRole('textbox', { name: 'Minimum listings', exact: true })).toHaveValue('');
+  await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
+});
+
+test('the whole price page scrolls instead of the item table on desktop and mobile', async ({ page }) => {
+  await service(page);
+  await page.route('**/api/v1/economy/overview?**', (route) => {
+    const overview = economyOverview();
+    overview.lines = Array.from({ length: 150 }, (_, index) =>
+      economyLine({ id: `item-${index}`, name: `Currency ${String(index).padStart(3, '0')}` }));
+    return route.fulfill({ json: overview });
+  });
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 640 });
+    await page.goto('/#/prices');
+    await page.reload();
+    const prices = page.getByRole('region', { name: 'Current prices', exact: true });
+    const table = page.locator('.economy-table');
+    const heading = page.locator('.economy-heading');
+    const sidebar = page.getByRole('navigation', { name: 'Economy categories', exact: true });
+    await expect(table.locator('tbody tr')).toHaveCount(100);
+    expect(await table.evaluate((element) => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+    expect(await prices.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    const headingTop = (await heading.boundingBox())!.y;
+    const sidebarTop = width > 760 ? (await sidebar.boundingBox())!.y : null;
+    await table.locator('tbody tr').first().hover();
+    await page.mouse.wheel(0, 480);
+    await expect.poll(() => prices.evaluate((element) => element.scrollTop)).toBeGreaterThan(100);
+    expect((await heading.boundingBox())!.y).toBeLessThan(headingTop - 100);
+    if (sidebarTop !== null) {
+      expect((await sidebar.boundingBox())!.y).toBeLessThan(sidebarTop - 100);
+      expect(await sidebar.evaluate((element) => element.scrollTop)).toBe(0);
+    }
+    expect(await table.evaluate((element) => element.scrollTop)).toBe(0);
+    await page.getByRole('button', { name: 'Show 100 more', exact: true }).click();
+    await expect(table.locator('tbody tr')).toHaveCount(150);
+    await table.locator('tbody tr').last().scrollIntoViewIfNeeded();
+    await expect(table.locator('tbody tr').last()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show 100 more', exact: true })).toHaveCount(0);
+  }
+});
+
 test('graph handles drag both period edges and history scrolls with the detail page', async ({ page }) => {
   await service(page);
   const points = Array.from({ length: 40 }, (_, index) => ({
@@ -155,6 +271,10 @@ test('graph handles drag both period edges and history scrolls with the detail p
   await expect(end).toHaveAttribute('aria-valuenow', '39');
   await table.locator('tbody tr').last().scrollIntoViewIfNeeded();
   await expect(table.locator('tbody tr').last()).toBeVisible();
+  expect(await page.locator('.item-detail').evaluate((element) =>
+    element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+  expect(await page.getByRole('region', { name: 'Current prices', exact: true })
+    .evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 });
 
 test('selected history dates persist across items, live leagues and archive datasets', async ({ page }) => {

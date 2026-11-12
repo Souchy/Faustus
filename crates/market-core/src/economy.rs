@@ -18,10 +18,8 @@ pub fn categories() -> Vec<Category> {
             &[
                 ("Currency", "Currency", true),
                 ("Fragment", "Fragments", true),
-                ("Wombgift", "Wombgifts", false),
                 ("Runegraft", "Runegrafts", true),
                 ("AllflameEmber", "Allflame Embers", true),
-                ("Corpse", "Corpses", false),
                 ("Tattoo", "Tattoos", true),
                 ("Omen", "Omens", true),
                 ("DjinnCoin", "Djinn Coins", true),
@@ -30,11 +28,21 @@ pub fn categories() -> Vec<Category> {
                 ("DivinationCard", "Divination Cards", true),
                 ("Artifact", "Artifacts", true),
                 ("Oil", "Oils", true),
+            ],
+        ),
+        (
+            "Items",
+            &[
+                ("SkillGem", "Skill Gems", false),
+                ("ImbuedGem", "Imbued Gems", false),
+                ("ClusterJewel", "Cluster Jewels", false),
+                ("Wombgift", "Wombgifts", false),
+                ("Corpse", "Corpses", false),
                 ("Incubator", "Incubators", false),
             ],
         ),
         (
-            "Equipment & Gems",
+            "Uniques",
             &[
                 ("UniqueWeapon", "Unique Weapons", false),
                 ("UniqueArmour", "Unique Armours", false),
@@ -45,9 +53,6 @@ pub fn categories() -> Vec<Category> {
                 ("ShrineBelt", "Shrine Belts", false),
                 ("UniqueTincture", "Unique Tinctures", false),
                 ("UniqueRelic", "Unique Relics", false),
-                ("SkillGem", "Skill Gems", false),
-                ("ImbuedGem", "Imbued Gems", false),
-                ("ClusterJewel", "Cluster Jewels", false),
             ],
         ),
         (
@@ -192,4 +197,71 @@ pub struct Observation {
     pub category: String,
     pub line: Line,
     pub point: Point,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_items_and_unique_equipment_without_moving_unique_maps() {
+        let categories = categories();
+        let group_ids = |group| {
+            categories
+                .iter()
+                .filter(|category| category.group == group)
+                .map(|category| category.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            group_ids("Items"),
+            [
+                "SkillGem",
+                "ImbuedGem",
+                "ClusterJewel",
+                "Wombgift",
+                "Corpse",
+                "Incubator",
+            ]
+        );
+        assert_eq!(
+            group_ids("Uniques"),
+            [
+                "UniqueWeapon",
+                "UniqueArmour",
+                "UniqueAccessory",
+                "UniqueFlask",
+                "UniqueJewel",
+                "ForbiddenJewel",
+                "ShrineBelt",
+                "UniqueTincture",
+                "UniqueRelic",
+            ]
+        );
+        assert!(group_ids("Atlas").contains(&"UniqueMap"));
+        assert!(
+            !categories
+                .iter()
+                .any(|category| category.group == "Equipment & Gems")
+        );
+        let unique_ids = categories
+            .iter()
+            .map(|category| &category.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique_ids.len(), categories.len());
+        for id in ["Currency", "Fragment"] {
+            let category = categories
+                .iter()
+                .find(|category| category.id == id)
+                .unwrap();
+            assert_eq!(category.group, "General");
+            assert_eq!(category.sources, ["exchange", "stash"]);
+        }
+        assert!(
+            categories
+                .iter()
+                .filter(|category| matches!(category.group.as_str(), "Items" | "Uniques"))
+                .all(|category| category.sources == ["stash"])
+        );
+    }
 }

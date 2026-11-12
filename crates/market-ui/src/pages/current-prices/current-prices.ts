@@ -402,7 +402,6 @@ export class CurrentPrices {
     void this.load();
   }
   reloadCategory(): void { this.clearFilters(); void this.load(); }
-  facetValue(field: 'gemLevel' | 'gemQuality' | 'links' | 'mapTier'): string { return this[field]; }
   setFacet(field: 'gemLevel' | 'gemQuality' | 'links' | 'mapTier', value: string): void {
     this[field] = value;
     this.limit = 100;
