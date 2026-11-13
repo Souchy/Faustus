@@ -1,0 +1,51 @@
+<section class="page historical-page" aria-label="Currency Exchange">
+  <h1>Currency Exchange</h1>
+  <p class="muted">GGG PC hourly trades, retained locally. Reads never download missing hours. Times are local; requests use exact UTC hours.</p>
+  <form class="historical-controls" submit.trigger:prevent="refresh()">
+    <label>Hour <input aria-label="Exchange hour" type="datetime-local" step="60" value.bind="hour" required></label>
+    <label>GGG league override <input aria-label="GGG league override" value.bind="customLeague" placeholder.bind="session.selectedLeagueName"></label>
+    <label>Range start <input aria-label="Import range start" type="datetime-local" step="60" value.bind="start" required></label>
+    <label>Range end <input aria-label="Import range end" type="datetime-local" step="60" value.bind="end" required></label>
+    <button type="submit" disabled.bind="isLoading">Load saved hours</button>
+    <button type="button" click.trigger="importHours()" disabled.bind="isLoading || job?.status === 'running'">Fetch missing hours</button>
+    <button type="button" click.trigger="importHours(true)" disabled.bind="isLoading || job?.status !== 'running'">Cancel import</button>
+  </form>
+  <p if.bind="error" role="alert" class="error">${error}</p>
+  <p if.bind="isLoading" role="status">Loading saved hours…</p>
+  <p if.bind="job" role="status">Import ${job.status}: ${job.completed_hours} / ${job.total_hours} hours. Background imports continue when leaving this page.</p>
+  <p if.bind="job?.error" role="alert" class="error">${job.error}</p>
+  <p if.bind="job?.warning" role="alert" class="warnings banner">Metadata warning: ${job.warning}. Raw item IDs may be shown where enrichment is unavailable.</p>
+  <section if.bind="coverage" aria-label="Import coverage">
+    <p>Coverage: ${coverage.completed_hours.length} / ${coverage.expected_hours} hours completed; ${coverage.failed_hours.length} failed. ${date(coverage.start)} → ${date(coverage.end)}.</p>
+    <ul if.bind="coverage.failed_hours.length"><li repeat.for="failure of coverage.failed_hours">${date(failure.hour)}: <span class="error">${failure.error}</span></li></ul>
+  </section>
+  <p if.bind="overview">Actual hour: ${date(overview.hour)} · ${overview.complete ? 'Complete' : 'Missing / incomplete — fetch missing hours explicitly'}</p>
+  <label>Search pair or item <input type="search" aria-label="Search exchange" value.bind="search"></label>
+  <div class="table-scroll">
+    <table aria-label="GGG native pairs"><thead><tr><th>Native pair</th><th>Amount A traded</th><th>Amount B traded</th><th>Average B per A</th></tr></thead>
+      <tbody><tr repeat.for="market of visibleMarkets; key: id">
+        <td><button click.trigger="selectMarket(market)">${market.a.name} / ${market.b.name}</button></td>
+        <td>${market.volume_a} ${market.a.name}</td><td>${market.volume_b} ${market.b.name}</td><td>${ratio(market)}</td>
+      </tr><tr if.bind="!markets.length"><td colspan="4">No saved matching pairs for this hour.</td></tr></tbody>
+    </table>
+  </div>
+  <p>Showing ${visibleMarkets.length} / ${markets.length} matching pairs.</p>
+  <button if.bind="visibleMarkets.length < markets.length" click.trigger="limit = limit + 100">Show 100 more pairs</button>
+  <article if.bind="selected" aria-label="Pair history">
+    <h2>${selected.a.name} / ${selected.b.name} history</h2>
+    <p if.bind="historyLoading" role="status">Loading history…</p>
+    <p if.bind="historyError" role="alert" class="error">${historyError}</p>
+    <template if.bind="history">
+      <p>History coverage: ${history.coverage.completed_hours.length} / ${history.coverage.expected_hours} hours. Missing hours are not connected.</p>
+      <ul><li repeat.for="failure of history.coverage.failed_hours">${date(failure.hour)}: ${failure.error}</li></ul>
+      <svg class="ggg-chart" viewBox="0 0 600 160" role="img" aria-label="Hourly average B per A; missing hours are gaps">
+        <title>Hourly average ${selected.b.name} per ${selected.a.name}; exact observations in table below</title>
+        <path repeat.for="segment of segments" d.bind="segment"></path>
+      </svg>
+      <div class="table-scroll"><table aria-label="Pair history observations"><thead><tr><th>Local hour</th><th>Average B per A</th><th>Amount A</th><th>Amount B</th></tr></thead>
+        <tbody><tr repeat.for="point of history.points.slice(0, historyLimit); key: hour"><td>${date(point.hour)}</td><td>${ratio(point.market)}</td><td>${point.market.volume_a}</td><td>${point.market.volume_b}</td></tr></tbody>
+      </table></div>
+      <button if.bind="historyLimit < history.points.length" click.trigger="historyLimit = historyLimit + 100">Show 100 more observations</button>
+    </template>
+  </article>
+</section>

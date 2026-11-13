@@ -1,0 +1,20 @@
+<div class="period-band">
+  <svg ref="svg" viewBox="0 0 1000 80" preserveAspectRatio="none" aria-label="Available observations and selected period"
+    pointermove.trigger="pointerMove($event)" pointerup.trigger="pointerUp($event)"
+    pointercancel.trigger="pointerCancel()" lostpointercapture.trigger="pointerCancel()">
+    <rect class="period-background" x="0" y="0" width="1000" height="80" pointerdown.trigger="pointerDown($event, 'pan')"></rect>
+    <g class="period-markers"><line repeat.for="marker of markers; key: time" class.bind="marker.kind & attr"
+      x1.bind="marker.x & attr" x2.bind="marker.x & attr" y1="8" y2="72"><title>${marker.title}</title></line></g>
+    <rect class="period-band-selection" x.bind="bandX & attr" y="20" width.bind="bandWidth & attr" height="40" pointerdown.trigger="pointerDown($event, 'band')"></rect>
+    <rect class="period-band-handle" x.bind="startX & attr" y="10" width="12" height="60"
+      role="slider" tabindex="0" aria-label="Period start" aria-valuemin.bind="min" aria-valuemax.bind="draftEnd - 3600"
+      aria-valuenow.bind="draftStart" aria-valuetext.bind="label(draftStart)"
+      pointerdown.trigger="pointerDown($event, 'start')" keydown.trigger="key($event, 'start')"></rect>
+    <rect class="period-band-handle" x.bind="endX & attr" y="10" width="12" height="60"
+      role="slider" tabindex="0" aria-label="Period end" aria-valuemin.bind="draftStart + 3600" aria-valuemax.bind="max"
+      aria-valuenow.bind="draftEnd" aria-valuetext.bind="label(draftEnd)"
+      pointerdown.trigger="pointerDown($event, 'end')" keydown.trigger="key($event, 'end')"></rect>
+  </svg>
+  <div class="period-caption"><small>Zoom range: ${label(viewStart)} → ${label(viewEnd)}</small>
+    <button type="button" click.trigger="resetZoom()">Reset zoom</button></div>
+</div>

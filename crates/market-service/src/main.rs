@@ -23,6 +23,12 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    BackfillConfidence {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
     Serve {
         #[arg(long, default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
@@ -60,6 +66,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match args.command {
+        Command::BackfillConfidence { name, file } => {
+            let count = economy::imports::backfill_confidence(&economy_store, &name, file)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            println!(
+                "{name}: restored {count} price-guarded confidence records; prices were not modified."
+            );
+        }
         Command::Serve {
             listen,
             user_agent,

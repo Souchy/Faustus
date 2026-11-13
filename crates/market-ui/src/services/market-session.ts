@@ -4,8 +4,11 @@ import { MarketApi } from '../core/market-api';
 import type { CurrentPrices } from '../pages/current-prices/current-prices';
 import type { GemFlipping } from '../pages/gem-flipping/gem-flipping';
 import type { SettingsPage } from '../pages/settings/settings-page';
+import type { CurrencyExchange } from '../pages/currency-exchange/currency-exchange';
+import type { FlipAnalysis } from '../pages/flip-analysis/flip-analysis';
+import type { TriangularArbitrage } from '../pages/triangular-arbitrage/triangular-arbitrage';
 
-export type MarketPage = 'prices' | 'gems' | 'settings';
+export type MarketPage = 'prices' | 'gems' | 'settings' | 'exchange' | 'flips' | 'triangular-arbitrage';
 
 export class MarketSession {
   private readonly api = resolve(MarketApi);
@@ -24,6 +27,12 @@ export class MarketSession {
   priceState: ReturnType<CurrentPrices['snapshot']> | null = null;
   gemState: ReturnType<GemFlipping['snapshot']> | null = null;
   gemRevision = 0;
+  exchange: CurrencyExchange | null = null;
+  flips: FlipAnalysis | null = null;
+  triangularArbitrage: TriangularArbitrage | null = null;
+  exchangeState: ReturnType<CurrencyExchange['snapshot']> | null = null;
+  flipState: ReturnType<FlipAnalysis['snapshot']> | null = null;
+  triangularArbitrageState: ReturnType<TriangularArbitrage['snapshot']> | null = null;
 
   get selectedDataset(): string {
     return this.historicalLeague ? `archive:${this.historicalLeague}` : this.selectedLeagueId;

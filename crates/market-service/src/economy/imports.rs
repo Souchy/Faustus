@@ -278,59 +278,7 @@ fn parse_zip(file: File, league: &str, sender: mpsc::Sender<Batch>) -> Result<()
             continue;
         };
         selected += 1;
-        let mut reader = csv::ReaderBuilder::new()
-            .delimiter(b';')
-            .trim(csv::Trim::All)
-            .from_reader(file);
-        let headers = reader.headers()?.clone();
-        for required in if kind == "currency" {
-            &["League", "Date", "Get", "Pay", "Value"][..]
-        } else {
-            &[
-                "League", "Date", "Id", "Type", "Name", "BaseType", "Variant", "Links", "Value",
-            ][..]
-        } {
-            if !headers
-                .iter()
-                .any(|h| h.trim_start_matches('\u{feff}') == *required)
-            {
-                return Err(format!("Missing CSV column {required} in {name}.").into());
-            }
-        }
-        let mut batch = Batch {
-            league: league.into(),
-            observations: Vec::with_capacity(10000),
-            reasons: BTreeMap::new(),
-        };
-        for record in reader.records() {
-            let record = record?;
-            let get = |key: &str| {
-                headers
-                    .iter()
-                    .position(|h| h.trim_start_matches('\u{feff}') == key)
-                    .and_then(|i| record.get(i))
-                    .unwrap_or("")
-            };
-            match observation(&get, kind, league) {
-                Ok(observation) => batch.observations.push(observation),
-                Err(reason) => *batch.reasons.entry(reason).or_default() += 1,
-            }
-            if batch.observations.len() >= 10000 || batch.reasons.values().sum::<u64>() >= 10000 {
-                sender
-                    .blocking_send(batch)
-                    .map_err(|_| "Import receiver stopped.")?;
-                batch = Batch {
-                    league: league.into(),
-                    observations: Vec::with_capacity(10000),
-                    reasons: BTreeMap::new(),
-                };
-            }
-        }
-        if !batch.observations.is_empty() || !batch.reasons.is_empty() {
-            sender
-                .blocking_send(batch)
-                .map_err(|_| "Import receiver stopped.")?;
-        }
+        parse_csv(file, &name, kind, league, &sender)?;
     }
     if selected != 2 {
         return Err(format!(
@@ -339,6 +287,120 @@ fn parse_zip(file: File, league: &str, sender: mpsc::Sender<Batch>) -> Result<()
         .into());
     }
     Ok(())
+}
+
+fn parse_csv(
+    file: impl Read,
+    name: &str,
+    kind: &str,
+    league: &str,
+    sender: &mpsc::Sender<Batch>,
+) -> Result<(), ImportError> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .trim(csv::Trim::All)
+        .from_reader(file);
+    let headers = reader.headers()?.clone();
+    for required in if kind == "currency" {
+        &["League", "Date", "Get", "Pay", "Value"][..]
+    } else {
+        &[
+            "League", "Date", "Id", "Type", "Name", "BaseType", "Variant", "Links", "Value",
+        ][..]
+    } {
+        if !headers
+            .iter()
+            .any(|h| h.trim_start_matches('\u{feff}') == *required)
+        {
+            return Err(format!("Missing CSV column {required} in {name}.").into());
+        }
+    }
+    let mut batch = Batch {
+        league: league.into(),
+        observations: Vec::with_capacity(10000),
+        reasons: BTreeMap::new(),
+    };
+    for record in reader.records() {
+        let record = record?;
+        let get = |key: &str| {
+            headers
+                .iter()
+                .position(|h| h.trim_start_matches('\u{feff}') == key)
+                .and_then(|i| record.get(i))
+                .unwrap_or("")
+        };
+        match observation(&get, kind, league) {
+            Ok(observation) => batch.observations.push(observation),
+            Err(reason) => *batch.reasons.entry(reason).or_default() += 1,
+        }
+        if batch.observations.len() >= 10000 || batch.reasons.values().sum::<u64>() >= 10000 {
+            sender
+                .blocking_send(batch)
+                .map_err(|_| "Import receiver stopped.")?;
+            batch = Batch {
+                league: league.into(),
+                observations: Vec::with_capacity(10000),
+                reasons: BTreeMap::new(),
+            };
+        }
+    }
+    if !batch.observations.is_empty() || !batch.reasons.is_empty() {
+        sender
+            .blocking_send(batch)
+            .map_err(|_| "Import receiver stopped.")?;
+    }
+    Ok(())
+}
+
+pub async fn backfill_confidence(
+    store: &market_store::SqliteStore,
+    name: &str,
+    path: PathBuf,
+) -> Result<u64, ImportError> {
+    let _lease = store
+        .try_economy_import_lock(name)?
+        .ok_or("Archive is already being imported or enriched by another process.")?;
+    let archive = store
+        .economy_imports()
+        .await?
+        .into_iter()
+        .find(|entry| entry.name == name && entry.status == "completed")
+        .ok_or("Confidence backfill requires an already completed import.")?;
+    let league = archive.league.ok_or("Saved import has no league.")?;
+    let name = name.to_owned();
+    let parser_league = league.clone();
+    let (sender, mut receiver) = mpsc::channel::<Batch>(2);
+    let parser = tokio::task::spawn_blocking(move || {
+        if path.is_dir() {
+            for kind in ["currency", "items"] {
+                let filename = format!("{name}.{kind}.csv");
+                parse_csv(
+                    File::open(path.join(&filename))?,
+                    &filename,
+                    kind,
+                    &parser_league,
+                    &sender,
+                )?;
+            }
+            Ok(())
+        } else {
+            parse_zip(File::open(path)?, &parser_league, sender)
+        }
+    });
+    let mut changed = 0;
+    while let Some(batch) = receiver.recv().await {
+        if !batch.reasons.is_empty() {
+            eprintln!(
+                "Confidence backfill skipped invalid/non-selected rows: {:?}",
+                batch.reasons
+            );
+        }
+        changed += store
+            .backfill_observation_confidence(&league, "stash", &batch.observations, &archive.name)
+            .await?;
+    }
+    parser.await??;
+    Ok(changed)
 }
 
 fn observation<'a>(
@@ -423,6 +485,11 @@ fn observation<'a>(
     if line.name.is_empty() {
         return Err("missing item name".into());
     }
+    let confidence = match get("Confidence") {
+        "" => None,
+        value @ ("High" | "Medium" | "Low") => Some(value.to_owned()),
+        _ => return Err("invalid confidence".into()),
+    };
     line.metadata.insert(
         "data_source".into(),
         "poe.ninja daily dump (CC BY-SA)".into(),
@@ -436,6 +503,7 @@ fn observation<'a>(
             currency: "Chaos Orb".into(),
             granularity: "daily".into(),
             volume: None,
+            confidence,
         },
     })
 }
@@ -547,6 +615,20 @@ mod tests {
             .unwrap();
         assert_eq!(history.points.len(), 2);
         assert_eq!(history.points[0].price, "40");
+        assert_eq!(history.points[0].confidence.as_deref(), Some("High"));
+        assert_eq!(history.points[1].confidence.as_deref(), Some("Low"));
+        assert_eq!(
+            backfill_confidence(&store, "TestLeague", file.clone())
+                .await
+                .unwrap(),
+            3
+        );
+        let unchanged = store
+            .economy_history("TestLeague", "UniqueWeapon", "stash", id, None)
+            .await
+            .unwrap();
+        assert_eq!(unchanged.points[0].price, "40");
+        assert_eq!(unchanged.points[1].confidence.as_deref(), Some("Low"));
         assert!(
             store
                 .economy_dates("Hardcore TestLeague", "UniqueWeapon", "stash")
@@ -573,6 +655,25 @@ mod tests {
             "completed"
         );
         use tower::ServiceExt;
+        let response = crate::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/analysis/flips?league=TestLeague&start=1767225600&end=1767312000&limit=1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(result["rows"][0]["start_confidence"], "High");
+        assert_eq!(result["rows"][0]["end_confidence"], "Low");
         let uri = format!(
             "/api/v1/economy/history?league=TestLeague&category=UniqueWeapon&source=stash&item={id}&days=7"
         );

@@ -3,6 +3,9 @@
     <nav aria-label="Market pages">
       <button class.bind="session.page === 'prices' ? 'active' : ''" aria-pressed.bind="session.page === 'prices'" click.trigger="router.load('/prices')">Current prices</button>
       <button class.bind="session.page === 'gems' ? 'active' : ''" aria-pressed.bind="session.page === 'gems'" click.trigger="router.load('/gems')">Gem flipping</button>
+      <button class.bind="session.page === 'exchange' ? 'active' : ''" aria-pressed.bind="session.page === 'exchange'" click.trigger="router.load('/exchange')">Currency Exchange</button>
+      <button class.bind="session.page === 'flips' ? 'active' : ''" aria-pressed.bind="session.page === 'flips'" click.trigger="router.load('/flips')">Flip analysis</button>
+      <button class.bind="session.page === 'triangular-arbitrage' ? 'active' : ''" aria-pressed.bind="session.page === 'triangular-arbitrage'" click.trigger="router.load('/triangular-arbitrage')">Triangular arbitrage</button>
     </nav>
     <label class="league-picker">League / dataset
       <select aria-label="League" value.to-view="session.selectedDataset" change.trigger="selectDataset($event.target.value)">
@@ -11,7 +14,7 @@
         <optgroup label="Historical"><option repeat.for="entry of session.archivedDatasets; key: id" value.bind="'archive:' + entry.id">${entry.name} (saved history)</option></optgroup>
       </select>
     </label>
-    <label class="as-of-picker" show.bind="session.page !== 'settings'">As of
+    <label class="as-of-picker" show.bind="session.page === 'prices' || session.page === 'gems'">As of
       <select if.bind="session.page === 'prices' || session.historicalLeague" aria-label="As of"
         disabled.bind="session.page === 'gems' ? gems?.gemLoading : prices?.isLoading" change.trigger="selectAsOfDate($event.target.value)">
         <option if.bind="!session.historicalLeague" value="" selected.to-view="!session.historicalDate">Latest</option>
@@ -25,7 +28,7 @@
       </select>
     </label>
     <button id="refresh" click.trigger="refresh()" disabled.bind="isLoading"
-      title.bind="session.page === 'settings' ? 'Refresh the published dataset catalog and local import statuses.' : 'Recheck current economy, gem and material prices; requests respect provider caches and refresh cooldowns.'">${isLoading ? 'Loading...' : 'Refresh'}</button>
+      title.bind="session.page === 'settings' ? 'Refresh the published dataset catalog and local import statuses.' : session.page === 'prices' || session.page === 'gems' ? 'Recheck current economy, gem and material prices; requests respect provider caches and refresh cooldowns.' : 'Reload retained historical data; does not fetch missing hours.'">${isLoading ? 'Loading...' : 'Refresh'}</button>
     <button class="settings-button" class.bind="session.page === 'settings' ? 'active' : ''" aria-label="Settings" title="Settings"
       aria-pressed.bind="session.page === 'settings'" click.trigger="router.load('/settings')"><span aria-hidden="true">&#9881;</span></button>
   </header>

@@ -676,7 +676,7 @@ test('main tabs, league, refresh and settings share one row without a branding h
         const bounds = element.getBoundingClientRect();
         return bounds.y + bounds.height / 2;
       }));
-    expect(centers).toHaveLength(6);
+    expect(centers).toHaveLength(9);
     expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(1);
   }
   const capture = page.waitForRequest((request) =>

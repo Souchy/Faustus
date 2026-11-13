@@ -65,7 +65,61 @@ Economy numbers use spaces as thousands separators and a decimal comma (for exam
 
 Item details replace the category title with a `Category > Item` breadcrumb. Click the category in that breadcrumb to return to the list with its filters and selected graph period preserved.
 
-The GGG history tab and active frontend market queries have been removed. Existing GGG database records, legacy read endpoints, and deprecated app code are retained.
+Current prices remains poe.ninja-only. The separate **Currency Exchange** page (`#/exchange`) browses GGG's PC hourly markets, **Flip analysis** (`#/flips`) compares historical growth across categories, and **Triangular arbitrage** (`#/triangular-arbitrage`, with `#/arbitrage` retained as an alias) finds implied historical three-market loops. Existing legacy GGG records and endpoints remain separate from the compact hourly store.
+
+### GGG hourly exchange history
+
+On Currency Exchange, choose a league and an inclusive start/end range, then use **Fetch missing hours**. Imports are explicit: opening a page, selecting a league or loading analysis does not start a full-league download. All completed hours can be retained; there is no sampling or automatic daily compaction. Select a league from the shared selector or enter a retained GGG league on the Exchange page. Requests are limited to 180 days per job, with dates entered/displayed in local time and converted to aligned UTC hours. The current unfinished hour cannot be imported.
+
+The backend fetches one GGG response per missing hour and saves all native market pairs for the selected league, including pairs involving neither Chaos nor Divine Orbs. Long item and market identities are interned in catalogs; all traded volumes, stock bounds and ratio bounds are stored as integer columns, without permanent all-league raw JSON copies. Names and categories use exact metadata IDs from the maintained [RePoE dataset](https://repoe-fork.github.io/), with conservative known-currency fallbacks; this is metadata enrichment, never a source of prices or price-identity substitutions. Unknown items retain their exact GGG IDs and partial metadata coverage is reported explicitly.
+
+Coverage is stored independently of market rows. A valid hourly response and its selected-league markets are committed together; an hour with no trades is still fetched, but zero traded amounts never become a zero price. Failed and missing hours remain distinguishable. Repeating an overlapping import skips completed hours. Imports can be cancelled, and interrupted imports can be resumed from persisted coverage after a service restart. Cancelling or navigating away does not delete observations. No old global cursor collector is re-enabled.
+
+The market browser displays native units and historical traded amounts. Its pair history breaks at missing hours and distinguishes unfetched hours from successfully imported hours without trades. GGG publishes hourly aggregates, not individual trades, live directional quotes or a complete order book. Hourly traded price is quote volume divided by item volume; reversing that average does not establish an executable opposite-side quote.
+
+### Historical growth and arbitrage
+
+Flip analysis selects two completed hourly endpoints and minimum/maximum **starting** prices in Chaos. It returns one row per item/variant across all categories, with start/end prices, absolute growth, percentage growth, provider and Exchange/Trade venue. Percentage growth is `(end / start - 1) * 100`; zero or unavailable starting prices are unrankable. The server filters and globally ranks endpoint deltas before returning a page of at most 100 rows, with a matching total and stable item tie-breaks. Search, category, venue and growth sorting apply to the full result, not just the visible page.
+
+Long item names wrap within a bounded button on desktop and mobile, while numeric columns stay on one line.
+
+Expanded flip native-history observations show ratios at least 1 by reversing sub-unit ratios and their item labels: `0.5 The Chosen per Chaos Orb` becomes `2 Chaos Orb per The Chosen`, while `90 Wild Crystallised Lifeforce per Chaos Orb` remains unchanged. Missing/zero-trade prices remain missing. This is display-only; charts retain a fixed native B-per-A direction and stored observations and growth calculations are unchanged.
+
+**Strict start date** is unchecked by default. Checking it reruns analysis using only the selected start hour (or UTC dataset day for archives), excluding later-starting items. Unchecked retains first-available in-period starts. The selected end remains strict in both modes. The choice persists when navigating between pages and applies to server-side filtering/ranking and pagination (`strict_start=true` on the flips API).
+
+Cluster jewel labels include their poe.ninja item-level bracket (1-49, 50-67, 68-74, 75-83 or 84-100). CSV dumps omit this field; archive rows recover it only from an exact provider ID, name, passive variant and base-type match in saved metadata before filtering and ranking. Different item-level brackets remain separate even with identical names and passive counts. Missing or ambiguous matches show `item level unknown` and retain their distinct provider identities; historical prices are never replaced with current prices.
+
+The selected start is the earliest permitted observation, not a requirement that every item already exists then. Items/pairs without a positive starting price use their first saved positive price inside the period, strictly before the ending observation. The selected end still requires an exact end-hour price (or UTC dataset day for archives). Actual starting dates are visible beside starting prices, and expanded alternatives show their own dates. Starts never move outside the period, across feeds/archives or to satisfy a minimum-volume threshold. GGG zero-trade hours are not prices. Missing imports can hide earlier activity; these are first **saved** observations, not guaranteed first-ever trades. Chaos conversion uses each actual observation's contemporaneous rate, not the selected start's rate.
+
+Analyze reloads the known datetime bounds after imports and clamps valid entered dates independently, preserving the other endpoint and filters. Invalid date syntax still reports an error. When official league datetimes are unavailable, fully fetched empty outer GGG hours can tighten day-only archive bounds to the observed active exchange window; a partial import cannot shrink the league to its fetched subset. Empty exchange hours are not observation ticks. These bounds are explicitly labeled observed, not official. Items starting later remain eligible; items without a selected-end price remain excluded.
+
+Each ranked row displays starting-hour → ending-hour item-unit volume for its selected GGG pair, not a period total or quote-currency volume. poe.ninja/archive rows show **Unknown** rather than a fabricated zero.
+
+poe.ninja dump rows also show the provider's confidence at the start and end observations (`High`, `Medium`, `Low`, or **Unknown**); this is not traded volume or a confidence score invented by Faustus. GGG confidence is not applicable. Confidence is saved per observation in a compact side table, rather than taken from an item's latest metadata.
+
+**Minimum poe.ninja confidence** mirrors the GGG minimum-volume filter: it applies only to poe.ninja/archive rows, leaving GGG rows unaffected. Either the actual starting **or** ending observation can meet the chosen confidence/volume threshold. `Low or higher`, `Medium or higher`, and `High only` accept a row when at least one observation qualifies; Unknown cannot qualify by itself, but does not disqualify a known qualifying opposite endpoint. The default **All confidence levels** includes Unknown. These filters use endpoints, not period averages; confidence labels are not averaged numerically. Filtering happens globally before category totals, ranking and pagination, including when items start later than the selected period start. The choice persists across page navigation; the flips API accepts `min_confidence=Low|Medium|High`.
+
+Global confidence filtering uses bounded batches and a covering archive/date confidence index, retaining the stored-price guard without random price-history reads. The index is built automatically on the first service startup after upgrading; existing prices and confidence values are unchanged.
+
+After the ranking appears, a separate cancellable batch loads historical Chaos sparklines for only its displayed rows (at most 100). Each series has at most 60 evenly spaced sampled hours or UTC dataset days. Missing sampled prices/conversions break the line; unsampled fluctuations and gaps are not represented. A single observed point is a dot, not an invented trend. GGG keeps the row's selected native pair throughout and converts using each sampled hour's direct Chaos cross-rate; poe.ninja uses the same feed/archive/granularity and contemporaneous rates. Charts never delay the ranking or trigger provider-history downloads. Changing pages, filters or leagues cancels obsolete chart requests; failures remain visible without discarding the ranking.
+
+Older imports did not retain the CSV `Confidence` column. Restore it without changing prices or rerunning a full import:
+
+```powershell
+market-service --database D:\Faustus\faustus.sqlite3 backfill-confidence --name Allflame --file G:\Downloads\Allflame
+```
+
+`--file` accepts either a dump ZIP or a directory containing the exact `<archive>.currency.csv` and `<archive>.items.csv` files. Only observations matching the completed import's league, identity, date, currency, archive and existing price are enriched. Unknown/mismatched values are not guessed; skipped CSV rows are reported. Future imports retain confidence automatically.
+
+The small **i** disclosure beside Flip analysis contains the calculation caveats, timeline instructions, coverage notes and volume-filter explanation. It opens by click or keyboard and closes with Escape; errors, loading and unavailable-analysis states remain visible outside it. The start/end controls display local dates as `yyyy-mm-dd hh:mm` independently of browser locale, retain bounded calendar pickers, and replace a duplicate selected-period caption.
+
+The period band shows actual saved hourly/daily observations. Drag either endpoint or the selected band, zoom around the pointer with the wheel, pan the visible window, or reset the view. Date inputs and handles stay inside the selected league's known bounds; defaults use available observations rather than an arbitrary recent window. When exact official league dates are unavailable, the UI explicitly identifies bounds derived from published archive dates or saved coverage. Missing data is never represented as a price observation. Period metadata uses a persisted observation-time manifest; endpoint reads use covering price and compact item-metadata indexes rather than loading complete histories or raw provider item payloads.
+
+GGG is preferred for overlapping unvariant items when usable endpoint data exists. Cross-provider display deduplication uses unambiguous exact item names without variants; native price identities and histories are never joined by name. Unknown metadata stays separate rather than guessing an identity. The same native pair must have trades at both endpoints: direct Chaos is preferred if it meets the minimum item-volume filter, otherwise a qualifying pair is chosen by its minimum endpoint item volume, not by its largest apparent growth. Expandable alternatives retain native prices, Chaos conversions and endpoint volumes. Conversions use each endpoint's directly traded Chaos cross-rate; no current rates, arbitrary multi-hop routes or different buy/sell providers are substituted. Unsupported conversions are excluded explicitly.
+
+ poe.ninja comparisons retain the same feed/archive, quote currency and granularity. Existing start-hour snapshots use the latest saved observation in that hour; missing starts seek the first positive saved observation within the period. Daily archives use UTC dataset days and do not acquire hourly precision merely because an hour was selected. Item variants stay separate and actual observation dates remain visible. Later-starting items have shorter comparison windows; growth is not annualized or duration-normalized. The minimum GGG item-volume filter applies only to GGG observations: poe.ninja/archive rows remain included with explicitly unknown liquidity, not a fabricated volume guarantee. Imported dump provenance is labelled as a dump rather than claiming that every exported category was necessarily stash-derived. This page does not backfill the undocumented poe.ninja chart endpoint.
+
+Triangular arbitrage evaluates Chaos-rooted three-market cycles within one completed GGG hour, retaining native pair rates. Returns are **implied historical discrepancies**, not executable real-time profit: the legs may have traded at different moments, and bid/ask spreads, available orders, gold costs, rounding and slippage are unknown. Its volume metric is the Chaos-equivalent bottleneck of historical traded amounts, not available trading capacity.
 
 ### Historical economy dumps
 
@@ -136,6 +190,9 @@ The service also exposes:
 - `POST /api/v1/gem-analysis/refresh?league=LEAGUE_ID` (revalidates both feeds with ETags and saves the resulting bundle; concurrent/repeated requests for a league reuse the last refresh attempt for one minute, including explicit provider errors)
 - `GET /api/v1/gem-analysis?league=LEAGUE_ID&snapshot=SNAPSHOT_ID` (immutable saved gem/material data for that league; database-only, without contacting providers; missing or cross-league IDs return 404)
 - `GET /api/v1/exchange/markets?league=LEAGUE_NAME&limit=100`
+- `GET /api/v1/analysis/period?league=LEAGUE_NAME` (known bounds, their provenance, and actual saved daily/hourly observation ticks)
+- `GET /api/v1/analysis/flips?league=LEAGUE_NAME&start=UTC_HOUR&end=UTC_HOUR&offset=0&limit=100` (optional `min_price`, `max_price`, GGG-only `min_volume`, `search`, `category`, `venue=exchange|trade`, and `sort=percent-desc|percent-asc|value-desc|value-asc`; returns the matching `total`, page metadata and bounded exclusion diagnostics)
+- `POST /api/v1/analysis/sparklines` with `{league,start,end,rows}` (the displayed flip rows only, at most 100; returns `series` with each row `id`, at most 60 `{time,price}` points in historical Chaos, nullable gaps and sampling/coverage warnings)
 
 The market query returns the latest stored snapshot for each pair in each league. The raw ratio and volume fields remain keyed by item identifier; the app does not infer a buy/sell price from them yet.
 
@@ -174,7 +231,7 @@ The Type dropdown is a multi-select list: click a type to toggle its highlight, 
 
 All UI dates use Canadian English (`en-CA`) formatting and the browser's local timezone. Full timestamps use year-month-day dates, 24-hour time, and a timezone name; snapshot options use an abbreviated month. Latest includes the latest gem overview's fetch time (for example, `Latest 19:56`), with its full local timestamp in the tooltip, even when viewing a saved instant. The gem page omits strategy descriptions and the data/explanation caption; calculation caveats remain documented above. API and database timestamps remain unchanged.
 
-The Aurelia application uses the full `@aurelia/router` package, not router-lite. Current prices, Gem flipping and Settings are real routes at `#/prices`, `#/gems` and `#/settings`, rendered in an `au-viewport`; the empty URL redirects to prices. Hash routing works in both the web frontend and the Tauri shell without server-side route rewrites. Direct links, reload and browser back/forward work.
+The Aurelia application uses the full `@aurelia/router` package, not router-lite. Current prices, Currency Exchange, Flip analysis, Triangular arbitrage, Gem flipping and Settings are real routes at `#/prices`, `#/exchange`, `#/flips`, `#/triangular-arbitrage`, `#/gems` and `#/settings`, rendered in an `au-viewport`; the empty URL redirects to prices and the old `#/arbitrage` route remains an alias. Hash routing works in both the web frontend and the Tauri shell without server-side route rewrites. Direct links, reload and browser back/forward work.
 
 `MarketApi` and `MarketSession` are registered as container-scoped singletons and obtained with `resolve(...)`. Each routed page owns its behavior directly in its matching TypeScript class; Aurelia's Vite conventions pair it with the matching HTML template without manual `CustomElement.define` calls. The session owns shared live-league selection, imported datasets and the historical day. It also retains explicit data-only page snapshots so filters, saved snapshot selection, item details and chart periods survive route-controller destruction within the running app, but not browser reloads. Active page references let the shared header delegate date selection and contextual refresh; those references are cleared when pages unload. Page requests and dump polling stop on unload, and DOM refs and request controllers are never saved in page snapshots. Tests can override service registrations through a DI container.
 
@@ -186,7 +243,7 @@ Frontend source organization:
 
 ## Data Collection Notes
 
-Normal service operation no longer starts the GGG historical cursor collector. Its old records and implementation remain available for deprecated integrations, without deleting or rewriting their data.
+Normal service operation does not start the old GGG global historical cursor collector. Explicit Currency Exchange range imports use the compact hourly store described above; the old records and implementation remain available for deprecated integrations without deleting or rewriting their data.
 
 poe.ninja's [supported economy API](https://poe.ninja/docs/api) supplies category overviews, not a supported full item-detail history API. The service records applicable categories for the selected live league on a 15-minute cycle with staggered requests. Provider responses are shared by economy and gem/material consumers, cached by league/category/source and conditionally revalidated with ETags. Manual refresh respects provider cache lifetimes; 304 responses retain original source timestamps instead of manufacturing new observations. Economy API requests go through the backend, not from end-user browsers. Item images load directly from `https://web.poecdn.com`; the desktop CSP permits that image origin only, without expanding script or API access. Send an appropriate descriptive User-Agent using `--user-agent`.
 
@@ -205,10 +262,10 @@ This product isn't affiliated with or endorsed by Grinding Gear Games in any way
 ## Workspace
 
 - `market-core`: shared identifiers, exact decimal quotes, comparisons, and API types.
-- `faustus-fetch`: GGG cursor-page client and raw response preservation.
+- `faustus-fetch`: GGG hourly/cursor-page HTTP client.
 - `ninja-fetch`: documented economy client, ETag handling, and overview DTOs.
-- `market-store`: SQLite migrations, transactional cursor recording, economy/import history, and gem snapshots.
-- `market-service`: local economy HTTP API, scheduled collectors, and ingestion/import CLI.
+- `market-store`: SQLite migrations, compact hourly market/coverage storage, legacy cursor recording, economy/import history, and gem snapshots.
+- `market-service`: local economy and analysis HTTP APIs, resumable hourly imports, scheduled poe.ninja collectors, and ingestion/import CLI.
 - `market-ui`: Aurelia v2/Vite frontend in `src`, with the Tauri v2 Rust desktop shell in `src-tauri`.
 - `market-ui-deprecated`: preserved GPUI desktop and single-threaded WebAssembly frontends; major pages live under `src/pages/`.
 

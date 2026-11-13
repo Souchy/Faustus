@@ -34,7 +34,9 @@ const SOURCE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const GEM_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const SNAPSHOT_REFRESH_COOLDOWN: Duration = Duration::from_secs(60);
 
+pub mod analysis;
 pub mod economy;
+pub mod ggg;
 
 #[derive(Clone)]
 pub struct ServiceState {
@@ -47,6 +49,7 @@ pub struct ServiceState {
     gem_overviews: Arc<RwLock<HashMap<String, CachedGemOverview>>>,
     snapshot_captures: Arc<Mutex<HashMap<String, CachedCapture>>>,
     economy: Arc<economy::EconomyState>,
+    ggg: Arc<ggg::GggState>,
 }
 
 #[derive(Clone)]
@@ -90,6 +93,7 @@ impl ServiceState {
             gem_overviews: Arc::default(),
             snapshot_captures: Arc::default(),
             economy: Arc::default(),
+            ggg: Arc::default(),
         }
     }
 
@@ -121,6 +125,8 @@ pub enum IngestError {
 pub fn router(state: ServiceState) -> Router {
     Router::new()
         .merge(economy::routes())
+        .merge(analysis::routes())
+        .merge(ggg::routes())
         .route("/health", get(health))
         .route("/api/v1/leagues", get(leagues))
         .route("/api/v1/selection", axum::routing::post(select_league))
@@ -567,14 +573,18 @@ async fn load_exchange_prices(
 
     let _ = category;
     let raw = economy::raw_overview(&state, &query.league, &query.category, "exchange", refresh)
-        .await.map_err(|error| error.0)?;
+        .await
+        .map_err(|error| error.0)?;
     let body = serde_json::from_value(raw.body).map_err(|error| {
         eprintln!("Invalid exchange overview: {error}");
         StatusCode::BAD_GATEWAY
     })?;
     let mut overview = current_price_overview(&query.league, &query.category, body);
     overview.fetched_at = raw.fetched_at;
-    let entry = CachedExchangePrices { checked_at: Instant::now(), overview };
+    let entry = CachedExchangePrices {
+        checked_at: Instant::now(),
+        overview,
+    };
     let overview = entry.overview.clone();
     state.exchange_prices.write().await.insert(key, entry);
     Ok(Json(overview))
@@ -611,14 +621,18 @@ async fn load_gem_overview(
     }
 
     let raw = economy::raw_overview(&state, &query.league, "SkillGem", "stash", refresh)
-        .await.map_err(|error| error.0)?;
+        .await
+        .map_err(|error| error.0)?;
     let body = serde_json::from_value(raw.body).map_err(|error| {
         eprintln!("Invalid gem overview: {error}");
         StatusCode::BAD_GATEWAY
     })?;
     let mut overview = gem_market_overview(&query.league, body);
     overview.fetched_at = raw.fetched_at;
-    let entry = CachedGemOverview { checked_at: Instant::now(), overview };
+    let entry = CachedGemOverview {
+        checked_at: Instant::now(),
+        overview,
+    };
     let overview = entry.overview.clone();
     state
         .gem_overviews

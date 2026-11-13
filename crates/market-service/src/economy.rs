@@ -160,7 +160,27 @@ async fn economy_leagues(State(state): State<ServiceState>) -> Result<Json<Vec<L
             });
         }
     }
+    merge_ggg_leagues(
+        &mut result,
+        state.store.ggg_leagues().await.map_err(failure)?,
+    );
     Ok(Json(result))
+}
+
+fn merge_ggg_leagues(result: &mut Vec<League>, stored: Vec<String>) {
+    for league in stored {
+        if !result
+            .iter()
+            .any(|entry| entry.id == league || entry.name == league)
+        {
+            result.push(League {
+                id: league.clone(),
+                name: league,
+                live: false,
+                archived: false,
+            });
+        }
+    }
 }
 
 async fn overview(
@@ -1128,6 +1148,35 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn ggg_catalog_preserves_live_and_poe_archive_labels() {
+        let mut leagues = vec![
+            League {
+                id: "live-slug".into(),
+                name: "Live".into(),
+                live: true,
+                archived: false,
+            },
+            League {
+                id: "Archive".into(),
+                name: "Archive".into(),
+                live: false,
+                archived: true,
+            },
+        ];
+        merge_ggg_leagues(
+            &mut leagues,
+            vec!["Live".into(), "Archive".into(), "GGG only".into()],
+        );
+        assert_eq!(leagues.len(), 3);
+        assert!(leagues[0].live);
+        assert!(!leagues[0].archived);
+        assert!(leagues[1].archived);
+        assert!(!leagues[2].live);
+        assert!(!leagues[2].archived);
+        assert_eq!(leagues[2].name, "GGG only");
+    }
+
+    #[test]
     fn archive_catalog_lists_each_import_identity_once_with_saved_status() {
         let archive = |name: &str, status: &str, rows: u64| Archive {
             name: name.into(),
@@ -1158,7 +1207,10 @@ mod tests {
             ],
         );
         assert_eq!(
-            result.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            result
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
             ["Allflame", "Ancestors", "Mirage", "Keepers"]
         );
         assert_eq!(result[0].status, "available");

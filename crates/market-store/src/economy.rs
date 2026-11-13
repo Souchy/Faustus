@@ -150,6 +150,7 @@ mod tests {
                         currency: "Chaos Orb".into(),
                         granularity: "daily".into(),
                         volume: None,
+                        confidence: None,
                     },
                 }
             });
@@ -178,6 +179,51 @@ mod tests {
             .unwrap();
         assert!(history.points.iter().all(|point| point.volume.is_none()));
     }
+}
+
+async fn save_confidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    league: &str,
+    source: &str,
+    observations: &[Observation],
+    archive: Option<&str>,
+) -> Result<u64, StoreError> {
+    let rows = observations
+        .iter()
+        .filter(|row| row.point.confidence.is_some())
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "WITH incoming(league,category,source,item,observed_at,currency,archive,confidence,price) AS (",
+    );
+    query.push_values(rows, |mut values, row| {
+        values
+            .push_bind(league)
+            .push_bind(&row.category)
+            .push_bind(source)
+            .push_bind(&row.line.id)
+            .push_bind(&row.point.date)
+            .push_bind(&row.point.currency)
+            .push_bind(archive.unwrap_or(""))
+            .push_bind(row.point.confidence.as_deref().unwrap())
+            .push_bind(&row.point.price);
+    });
+    // Catalog rowids stay stable under item upserts and avoid repeating long variant IDs for every day.
+    // Guard confidence by its original price at read time, avoiding millions of random price-table reads.
+    query.push(
+        ") INSERT INTO economy_observation_confidence(item,observed_at,currency,archive,confidence,price)
+        SELECT i.rowid,n.observed_at,n.currency,n.archive,n.confidence,n.price FROM incoming n
+        CROSS JOIN economy_items i USING(league,category,source,item)
+        WHERE true
+        ON CONFLICT DO UPDATE SET confidence=excluded.confidence,price=excluded.price",
+    );
+    Ok(query
+        .build()
+        .execute(&mut **transaction)
+        .await?
+        .rows_affected())
 }
 
 impl SqliteStore {
@@ -227,6 +273,7 @@ impl SqliteStore {
                         currency: overview.quote_currency.clone(),
                         granularity: "snapshot".into(),
                         volume: line.volume.clone(),
+                        confidence: None,
                     },
                 })
             })
@@ -247,6 +294,25 @@ impl SqliteStore {
         archive: Option<&str>,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
+        let times = observations
+            .iter()
+            .map(|observation| (&observation.point.date, &observation.point.granularity))
+            .collect::<HashSet<_>>();
+        for batch in times.into_iter().collect::<Vec<_>>().chunks(1000) {
+            let mut query =
+                sqlx::QueryBuilder::<sqlx::Sqlite>::new("INSERT INTO economy_observation_times ");
+            query.push_values(batch, |mut row, (date, granularity)| {
+                row.push_bind(league)
+                    .push_bind(date)
+                    .push_bind(granularity)
+                    .push_bind(archive.unwrap_or(""));
+            });
+            query
+                .push(" ON CONFLICT DO NOTHING")
+                .build()
+                .execute(&mut *transaction)
+                .await?;
+        }
         let categories: HashSet<&str> = observations.iter().map(|o| o.category.as_str()).collect();
         if !categories.is_empty() {
             let mut query =
@@ -303,9 +369,27 @@ impl SqliteStore {
                 .build()
                 .execute(&mut *transaction)
                 .await?;
+            save_confidence(&mut transaction, league, source, batch, archive).await?;
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn backfill_observation_confidence(
+        &self,
+        league: &str,
+        source: &str,
+        observations: &[Observation],
+        archive: &str,
+    ) -> Result<u64, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let mut count = 0;
+        for batch in observations.chunks(1000) {
+            count +=
+                save_confidence(&mut transaction, league, source, batch, Some(archive)).await?;
+        }
+        transaction.commit().await?;
+        Ok(count)
     }
 
     pub async fn current_economy(
@@ -517,11 +601,16 @@ impl SqliteStore {
             })
             .unwrap_or_default();
         let rows = sqlx::query(
-            "SELECT observed_at,price,currency,granularity,volume FROM (
-               SELECT observed_at,price,currency,granularity,volume FROM economy_observations o
+            "SELECT r.*,(SELECT c.confidence FROM economy_observation_confidence c
+               WHERE c.item=(SELECT rowid FROM economy_items i WHERE i.league=r.league
+                   AND i.category=r.category AND i.source=r.source AND i.item=r.item)
+                 AND c.observed_at=r.observed_at AND c.currency=r.currency
+                 AND (c.price IS NULL OR c.price=r.price)
+                 AND c.archive=coalesce(r.archive,'')) AS confidence FROM (
+               SELECT league,category,source,item,observed_at,price,currency,granularity,volume,archive FROM economy_observations o
                WHERE league=? AND category=? AND source=? AND item=? AND observed_at>=?
                AND (archive IS NULL OR EXISTS (SELECT 1 FROM economy_imports a WHERE a.name=o.archive AND json_extract(a.status_json,'$.status')='completed'))
-               ORDER BY observed_at DESC LIMIT 20000) ORDER BY observed_at")
+               ORDER BY observed_at DESC LIMIT 20000) r ORDER BY observed_at")
             .bind(league).bind(category).bind(source).bind(item).bind(since).fetch_all(&self.pool).await?;
         let points: Vec<Point> = rows
             .into_iter()
@@ -531,6 +620,7 @@ impl SqliteStore {
                 currency: row.get("currency"),
                 granularity: row.get("granularity"),
                 volume: row.get("volume"),
+                confidence: row.get("confidence"),
             })
             .collect();
         Ok(History {
@@ -589,6 +679,14 @@ impl SqliteStore {
             .execute(&mut *transaction)
             .await?;
         sqlx::query("DELETE FROM economy_categories WHERE archive=?")
+            .bind(name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM economy_observation_times WHERE archive=?")
+            .bind(name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM economy_observation_confidence WHERE archive=?")
             .bind(name)
             .execute(&mut *transaction)
             .await?;

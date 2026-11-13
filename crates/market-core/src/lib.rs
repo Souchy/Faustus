@@ -3,7 +3,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod analysis;
 pub mod economy;
+pub mod ggg;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ServiceStatus {

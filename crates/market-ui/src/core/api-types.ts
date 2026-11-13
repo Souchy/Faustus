@@ -166,3 +166,57 @@ export interface EconomyArchive {
   license: string;
   url: string;
 }
+export interface GggItem { id: string; name: string; category: string; icon: string | null }
+export interface GggMarket {
+  id: string; a: GggItem; b: GggItem; volume_a: string; volume_b: string;
+  low_stock_a: string; low_stock_b: string; high_stock_a: string; high_stock_b: string;
+  low_ratio_a: string; low_ratio_b: string; high_ratio_a: string; high_ratio_b: string;
+}
+export interface GggCoverage {
+  league: string; start: number; end: number; expected_hours: number; completed_hours: number[];
+  failed_hours: { hour: number; error: string }[];
+}
+export interface GggOverview { league: string; hour: number; complete: boolean; markets: GggMarket[]; platform?: 'PC' }
+export interface GggHistory {
+  league: string; market: string; points: { hour: number; market: GggMarket }[]; coverage: GggCoverage;
+}
+export interface GggImportJob {
+  league: string; start: number; end: number; status: 'running' | 'completed' | 'cancelled' | 'failed';
+  completed_hours: number; total_hours: number; error: string | null;
+  warning?: string | null;
+  platform?: 'PC';
+}
+export interface PairAlternative {
+  start_observed_at?: string; end_observed_at?: string;
+  market: string; quote: string; native_start: string; native_end: string; start_price: string;
+  end_price: string; growth: string; growth_percent: string; start_volume: string; end_volume: string; selected: boolean;
+}
+export interface FlipRow {
+  id: string; name: string; category: string; venue: 'exchange' | 'trade'; source: string;
+  start_price: string; end_price: string; growth: string; growth_percent: string;
+  start_observed_at: string; end_observed_at: string; pair: string; alternatives: PairAlternative[];
+  native_start?: string; native_end?: string;
+  history_category?: string | null; history_source?: string | null; history_item?: string | null;
+  start_confidence?: string | null; end_confidence?: string | null;
+  history_archive?: string | null; history_granularity?: string | null;
+}
+export interface FlipSparklinePoint { time: number; price: string | null }
+export interface FlipSparklineSeries { id: string; points: FlipSparklinePoint[]; warnings: string[] }
+export interface FlipSparklines { series: FlipSparklineSeries[] }
+export interface FlipAnalysis {
+  league: string; start: number; end: number; rows: FlipRow[];
+  excluded: { name: string; reason: string }[]; warnings: string[];
+  total: number; offset: number; limit: number; excluded_total: number; categories: string[];
+}
+export interface AnalysisPeriod {
+  league: string; start: number | null; end: number | null;
+  bounds_source: 'official' | 'archive' | 'observed' | 'unavailable';
+  hours: number[]; days: string[]; warnings: string[];
+}
+export interface ArbitrageLoop {
+  id: string; path: string[]; rates: string[]; market_ids: string[]; return_percent: string;
+  start_amount: string; end_amount: string; minimum_volume: string;
+}
+export interface ArbitrageAnalysis {
+  league: string; hour: number; complete: boolean; loops: ArbitrageLoop[]; warnings: string[];
+}

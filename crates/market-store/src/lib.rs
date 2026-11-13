@@ -12,10 +12,14 @@ use thiserror::Error;
 
 const EXCHANGE_PROVIDER_KEY: &str = "ggg_exchange";
 
+mod analysis;
 mod economy;
+mod ggg;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error("invalid GGG hourly data: {0}")]
+    Ggg(String),
     #[error("SQLite operation failed: {0}")]
     Sql(#[from] sqlx::Error),
     #[error("failed to encode market data: {0}")]
@@ -62,7 +66,8 @@ impl SqliteStore {
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(Duration::from_secs(5));
         if economy {
-            options = options.synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+            options = options
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
                 .pragma("cache_size", "-32768");
         }
         let pool = SqlitePoolOptions::new()
@@ -418,6 +423,23 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
             include_str!("../migrations/0005_economy_dates_covering.sql"),
         ),
         (6_i64, include_str!("../migrations/0006_economy_volume.sql")),
+        (7_i64, include_str!("../migrations/0007_ggg_hourly.sql")),
+        (
+            8_i64,
+            include_str!("../migrations/0008_analysis_endpoints.sql"),
+        ),
+        (
+            9_i64,
+            include_str!("../migrations/0009_observation_confidence.sql"),
+        ),
+        (
+            10_i64,
+            include_str!("../migrations/0010_confidence_price_guard.sql"),
+        ),
+        (
+            11_i64,
+            include_str!("../migrations/0011_confidence_dates_covering.sql"),
+        ),
     ] {
         let applied: Option<i64> =
             sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = ?")

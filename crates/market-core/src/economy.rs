@@ -163,6 +163,8 @@ pub struct Point {
     pub granularity: String,
     #[serde(default)]
     pub volume: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

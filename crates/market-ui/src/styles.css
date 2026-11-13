@@ -12,6 +12,53 @@ market-app { display: block; }
 gem-flipping, settings-page { display: contents; }
 au-viewport, current-prices { display: flex; flex: 1; min-height: 0; }
 dump-manager { display: flex; flex: 1; min-height: 0; }
+currency-exchange, flip-analysis, triangular-arbitrage { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.historical-page { overflow: auto; min-width: 0; padding-bottom: 12px; }
+.historical-page > * { flex-shrink: 0; }
+.historical-page h1 { font-size: 20px; margin: 0; }
+.historical-page h2 { font-size: 16px; }
+.historical-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.historical-controls label { flex-direction: column; align-items: start; gap: 4px; font-size: 12px; }
+.historical-controls input { max-width: 230px; }
+.historical-date-control { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.iso-date-input { position: relative; display: flex; gap: 4px; }
+.iso-date-input > input[type="text"] { width: 23ch; }
+.historical-controls .native-date-picker { position: absolute; bottom: 0; left: 0; width: 1px; min-width: 0; height: 1px; padding: 0; opacity: 0; pointer-events: none; }
+.iso-date-input button { display: grid; place-items: center; padding: 6px; }
+period-band { display: block; min-width: 0; width: 100%; }
+.period-band svg { display: block; width: 100%; height: 100px; overflow: hidden; touch-action: none; }
+.period-background { fill: #161616; cursor: grab; }
+.period-markers line { stroke: #97b6c8; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.period-markers .day { stroke: #d7bc85; stroke-width: 2; }
+.period-band-selection { fill: #79b4d44d; stroke: #79b4d4; cursor: grab; }
+.period-band-handle { fill: #9accea; stroke: transparent; stroke-width: 28; vector-effect: non-scaling-stroke; cursor: ew-resize; }
+.period-band-handle:focus { fill: #ffcf75; outline: none; stroke: #fff; stroke-width: 2; }
+.period-caption { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.period-caption small { overflow-wrap: anywhere; }
+.historical-page .table-scroll { flex: none; overflow: auto; max-width: 100%; }
+.historical-page td small { display: block; color: #aaa; }
+.flip-item-name { max-width: min(32rem, 60vw); white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.flip-sparkline { display: block; width: 120px; height: 36px; color: #a9cbef; }
+.flip-sparkline path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.flip-sparkline circle { fill: currentColor; }
+.historical-page .flip-chart-cell { min-width: 120px; max-width: 240px; white-space: normal; overflow-wrap: anywhere; }
+.historical-page .flip-chart-cell .warning { color: #e6b96b; }
+.historical-page article { min-width: 0; }
+.historical-page ul, .historical-page ol { padding-left: 24px; }
+.historical-page a { color: #a9cbef; }
+.analysis-heading { position: relative; display: flex; align-items: center; gap: 8px; }
+.analysis-info summary { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 50%; list-style: none; font-weight: 600; }
+.analysis-info summary::-webkit-details-marker { display: none; }
+.analysis-info summary:focus-visible { outline: 2px solid #a9cbef; outline-offset: 2px; }
+.analysis-info[open] summary { border-color: #a9cbef; color: #a9cbef; }
+.analysis-info-content { position: absolute; top: calc(100% + 8px); left: 0; z-index: 20; width: min(42rem, 100%); max-height: min(60vh, 28rem); overflow: auto; padding: 12px 16px; border: 1px solid #484848; border-radius: 6px; background: #161616; box-shadow: 0 6px 20px #0008; line-height: 1.5; overflow-wrap: anywhere; }
+.analysis-info-content > p:first-child { margin-top: 0; }
+.analysis-info-content > :last-child { margin-bottom: 0; }
+.analysis-detail { white-space: normal; }
+.analysis-detail p { margin-bottom: 8px; }
+.warnings { color: #e6b96b; }
+.ggg-chart { width: 100%; max-height: 220px; background: #161616; }
+.ggg-chart path { stroke: #a9cbef; stroke-width: 2; stroke-linecap: round; fill: none; }
 main { height: 100dvh; display: flex; flex-direction: column; padding: 0 24px 16px; }
 button, input, select { font: inherit; color: inherit; }
 button, select, summary, input:not([type="checkbox"]) {

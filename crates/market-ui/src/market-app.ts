@@ -5,6 +5,9 @@ import { MarketSession } from './services/market-session';
 import { CurrentPrices } from './pages/current-prices/current-prices';
 import { GemFlipping } from './pages/gem-flipping/gem-flipping';
 import { SettingsPage } from './pages/settings/settings-page';
+import { CurrencyExchange } from './pages/currency-exchange/currency-exchange';
+import { FlipAnalysis } from './pages/flip-analysis/flip-analysis';
+import { TriangularArbitrage } from './pages/triangular-arbitrage/triangular-arbitrage';
 
 export class MarketApp {
   readonly router = resolve(IRouter);
@@ -21,6 +24,9 @@ export class MarketApp {
         { path: '', redirectTo: 'prices' },
         { path: 'prices', component: CurrentPrices, title: 'Current prices' },
         { path: 'gems', component: GemFlipping, title: 'Gem flipping' },
+        { path: 'exchange', component: CurrencyExchange, title: 'Currency Exchange' },
+        { path: 'flips', component: FlipAnalysis, title: 'Flip analysis' },
+        { path: ['triangular-arbitrage', 'arbitrage'], component: TriangularArbitrage, title: 'Triangular arbitrage' },
         { path: 'settings', component: SettingsPage, title: 'Settings' },
       ],
     };
@@ -39,7 +45,8 @@ export class MarketApp {
   }
 
   get isLoading(): boolean {
-    return this.gems?.isLoading || this.prices?.isLoading || this.settings?.isLoading || false;
+    return this.gems?.isLoading || this.prices?.isLoading || this.settings?.isLoading
+      || this.session.exchange?.isLoading || this.session.flips?.isLoading || this.session.flips?.periodLoading || this.session.triangularArbitrage?.isLoading || false;
   }
 
   async selectAsOfDate(date: string): Promise<void> {
@@ -57,11 +64,17 @@ export class MarketApp {
     if (this.gems) await this.gems.selectDataset(value);
     else await this.session.selectDataset(value);
     if (this.prices) await this.prices.load();
+    if (this.session.exchange) await this.session.exchange.datasetChanged();
+    if (this.session.flips) await this.session.flips.datasetChanged();
+    if (this.session.triangularArbitrage) await this.session.triangularArbitrage.refresh();
   }
 
   async refresh(): Promise<void> {
     if (this.settings) await this.settings.refresh();
     else if (this.gems) await this.gems.refresh();
+    else if (this.session.exchange) await this.session.exchange.refresh();
+    else if (this.session.flips) await this.session.flips.datasetChanged();
+    else if (this.session.triangularArbitrage) await this.session.triangularArbitrage.refresh();
     else await this.prices?.refresh();
   }
 

@@ -1,0 +1,28 @@
+<section class="page historical-page" aria-label="Triangular arbitrage">
+  <h1>Triangular arbitrage</h1>
+  <p class="warnings">IMPLIED HISTORICAL returns, not executable or live opportunities. Three-edge loops use hourly means from different, nonconcurrent trades; no bid/ask spread or gold costs are included. Start and end amounts are Chaos.</p>
+  <form class="historical-controls" submit.trigger:prevent="refresh()">
+    <label>Hour (local) <input aria-label="Arbitrage hour" type="datetime-local" step="60" value.bind="hour" required></label>
+    <label>Minimum historical volume (Chaos-equivalent) <input aria-label="Arbitrage minimum volume" inputmode="decimal" value.bind="minVolume"></label>
+    <button type="submit" disabled.bind="isLoading">Analyze arbitrage</button>
+  </form>
+  <p if.bind="error" role="alert" class="error">${error}</p>
+  <p if.bind="isLoading" role="status">Analyzing saved hour…</p>
+  <template if.bind="result">
+    <p>Actual observation hour: ${date(result.hour)} · ${result.complete ? 'Complete saved hour' : 'Incomplete coverage — results may be absent'}</p>
+    <ul class="warnings" aria-label="Arbitrage warnings"><li repeat.for="warning of result.warnings">${warning}</li></ul>
+    <label>Minimum return % <input aria-label="Minimum return %" inputmode="decimal" value.bind="minReturn"></label>
+    <p if.bind="filterError" role="alert" class="error">${filterError}</p>
+    <div class="table-scroll"><table aria-label="Historical arbitrage loops"><thead><tr><th>Three-edge path</th><th>Start Chaos</th><th>End Chaos</th><th>Implied return %</th><th>Historical bottleneck volume (Chaos-equivalent)</th></tr></thead>
+      <tbody><template repeat.for="loop of visibleLoops; key: id">
+        <tr><td><button aria-expanded.bind="expanded.includes(loop.id)" click.trigger="toggle(loop.id)">${loop.path.join(' → ')}</button></td><td>${loop.start_amount}</td><td>${loop.end_amount}</td><td>${loop.return_percent}%</td><td>${loop.minimum_volume}</td></tr>
+        <tr if.bind="expanded.includes(loop.id)"><td colspan="5" class="analysis-detail"><p>Hourly mean observations at ${date(result.hour)}; native rates per leg:</p>
+          <ol><li repeat.for="rate of loop.rates">${loop.path[$index]} → ${loop.path[$index + 1]}: ${rate} · market ${loop.market_ids[$index]}</li></ol>
+          <a load="route: /exchange; context.bind: null">Inspect saved pair histories in Currency Exchange</a>
+        </td></tr>
+      </template><tr if.bind="!loops.length"><td colspan="5">No matching historical loops.</td></tr></tbody>
+    </table></div>
+    <p>Showing ${visibleLoops.length} / ${loops.length} matching loops.</p>
+    <button if.bind="visibleLoops.length < loops.length" click.trigger="limit = limit + 100">Show 100 more loops</button>
+  </template>
+</section>
