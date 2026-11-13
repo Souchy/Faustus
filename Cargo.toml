@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/market-core", "crates/faustus-fetch", "crates/ninja-fetch", "crates/market-store", "crates/market-service", "crates/market-ui/src-tauri", "crates/market-ui-deprecated"]
+members = ["crates/market-core", "crates/faust-fetch", "crates/ninja-fetch", "crates/market-store", "crates/market-service", "crates/market-ui/src-tauri", "crates/market-ui-deprecated"]
 resolver = "3"
 
 [workspace.package]

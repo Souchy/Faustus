@@ -8,7 +8,7 @@ rust-version.workspace = true
 [dependencies]
 bytes.workspace = true
 chrono.workspace = true
-faustus-fetch = { path = "../faustus-fetch" }
+faust-fetch = { path = "../faust-fetch" }
 market-core = { path = "../market-core" }
 serde_json.workspace = true
 rust_decimal.workspace = true

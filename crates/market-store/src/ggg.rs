@@ -1,4 +1,4 @@
-use faustus_fetch::ExchangePage;
+use faust_fetch::ExchangePage;
 use market_core::ggg::{Coverage, HOUR, History, HistoryPoint, HourFailure, Item, Market};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
@@ -397,7 +397,7 @@ impl SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use faustus_fetch::{ExchangeCursor, ExchangeMarket};
+    use faust_fetch::{ExchangeCursor, ExchangeMarket};
     use std::collections::BTreeMap;
 
     async fn store() -> SqliteStore {

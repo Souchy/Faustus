@@ -9,7 +9,7 @@ rust-version.workspace = true
 axum.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["env"] }
-faustus-fetch = { path = "../faustus-fetch" }
+faust-fetch = { path = "../faust-fetch" }
 ninja-fetch = { path = "../ninja-fetch" }
 market-store = { path = "../market-store" }
 market-core = { path = "../market-core" }

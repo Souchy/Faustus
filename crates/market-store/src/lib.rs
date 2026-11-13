@@ -1,7 +1,7 @@
 use std::{path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
-use faustus_fetch::{ExchangeCursor, FetchedPage};
+use faust_fetch::{ExchangeCursor, FetchedPage};
 use market_core::{ExchangeMarketSnapshot, GemAnalysisData, GemSnapshotOption};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -502,7 +502,7 @@ mod tests {
 
     use bytes::Bytes;
     use chrono::TimeZone;
-    use faustus_fetch::{ExchangeMarket, ExchangePage, ResponseMetadata};
+    use faust_fetch::{ExchangeMarket, ExchangePage, ResponseMetadata};
 
     use super::*;
 

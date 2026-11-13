@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use faustus_fetch::ExchangePage;
+use faust_fetch::ExchangePage;
 use market_core::ggg::{self as dto, HOUR, ImportJob, Item};
 use serde::Deserialize;
 use tokio::sync::{Mutex, watch};
@@ -699,7 +699,7 @@ mod tests {
                 async move {
                     count.fetch_add(1, Ordering::SeqCst);
                     Json(ExchangePage {
-                        next_change_id: faustus_fetch::ExchangeCursor::new((hour + HOUR) as u64),
+                        next_change_id: faust_fetch::ExchangeCursor::new((hour + HOUR) as u64),
                         markets: vec![],
                     })
                 }
@@ -727,7 +727,7 @@ mod tests {
                 "Test",
                 HOUR,
                 &ExchangePage {
-                    next_change_id: faustus_fetch::ExchangeCursor::new((HOUR * 2) as u64),
+                    next_change_id: faust_fetch::ExchangeCursor::new((HOUR * 2) as u64),
                     markets: vec![],
                 },
             )
@@ -764,7 +764,7 @@ mod tests {
                 "Test",
                 0,
                 &ExchangePage {
-                    next_change_id: faustus_fetch::ExchangeCursor::new(HOUR as u64),
+                    next_change_id: faust_fetch::ExchangeCursor::new(HOUR as u64),
                     markets: vec![],
                 },
             )

@@ -3,7 +3,8 @@
     <div><h2>Historical datasets</h2><p class="muted">poe.ninja dumps · CC BY-SA · Daily prices · Softcore challenge leagues only</p></div>
     <button click.trigger="loadArchives(true)" disabled.bind="archiveLoading">Discover dumps</button>
   </div>
-  <p class="muted">Import and manage saved datasets here. Use League / dataset and As of in the header to browse their prices.</p>
+  <p class="muted">No historical league data is bundled with the app. Import only the datasets you want; each import downloads and saves that league locally for future launches. Discover dumps only refreshes the catalog.</p>
+  <p class="muted">Use League / dataset and As of in the header to browse saved prices. The last selected live league continues collecting automatically every 15 minutes while the app is running, including while you browse historical data.</p>
   <p if.bind="!allflameAvailable && !archiveLoading" class="muted">Allflame has not been published in the catalog yet. Discover dumps again once it is available.</p>
   <p if.bind="archiveError" class="error" role="alert">${archiveError}</p>
   <p if.bind="notice" role="status">${notice}</p>

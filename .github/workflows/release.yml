@@ -1,0 +1,123 @@
+name: Release Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: crates/market-ui/package-lock.json
+
+      - name: Test release planning
+        run: node --test scripts\release-plan.test.cjs
+
+      - name: Check version and existing releases
+        id: plan
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.payload.repository.private) {
+              throw new Error('The updater needs public release assets. Private repositories require a separate public distribution repository.');
+            }
+            const { planRelease } = require(`${process.env.GITHUB_WORKSPACE}/scripts/release-plan.cjs`);
+            const { version } = require(`${process.env.GITHUB_WORKSPACE}/crates/market-ui/package.json`);
+            const plan = await planRelease({
+              github, ...context.repo, version, sha: context.sha,
+            });
+            core.setOutput('publish', String(plan.publish));
+            core.setOutput('tag', plan.tag);
+            await core.summary.addRaw(plan.reason).write();
+
+      - name: Configure signed updates
+        if: steps.plan.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATER_PUBLIC_KEY)) {
+            throw 'Set the TAURI_UPDATER_PUBLIC_KEY repository variable first.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_KEY)) {
+            throw 'Set the TAURI_SIGNING_PRIVATE_KEY repository secret first.'
+          }
+          $config = @{
+            bundle = @{ createUpdaterArtifacts = $true }
+            plugins = @{ updater = @{ pubkey = $env:UPDATER_PUBLIC_KEY.Trim() } }
+          } | ConvertTo-Json -Depth 5
+          $config | Set-Content -Encoding utf8 -Path "$env:RUNNER_TEMP\tauri.release.json"
+
+      - name: Install Rust
+        if: steps.plan.outputs.publish == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        if: steps.plan.outputs.publish == 'true'
+        working-directory: crates/market-ui
+        run: npm ci
+
+      - name: Test application
+        if: steps.plan.outputs.publish == 'true'
+        run: |
+          cargo test --locked -p market-ui --bin faust-desktop
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix crates\market-ui test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build installer and upload draft release
+        if: steps.plan.outputs.publish == 'true'
+        id: build
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: crates/market-ui
+          args: --config "${{ runner.temp }}\tauri.release.json" -- --locked
+          tagName: ${{ steps.plan.outputs.tag }}
+          releaseName: Faust ${{ steps.plan.outputs.tag }}
+          releaseCommitish: ${{ github.sha }}
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+      - name: Verify assets and publish release
+        if: steps.plan.outputs.publish == 'true'
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ steps.build.outputs.releaseId }}
+        with:
+          script: |
+            const release_id = Number(process.env.RELEASE_ID);
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              ...context.repo, release_id, per_page: 100,
+            });
+            const installer = assets.find(asset => asset.name.endsWith('-setup.exe'));
+            if (!installer || !assets.some(asset => asset.name === `${installer.name}.sig`)
+                || !assets.some(asset => asset.name === 'latest.json')) {
+              throw new Error('Missing installer, signature or latest.json; leaving the release as a draft.');
+            }
+            const release = await github.rest.repos.updateRelease({
+              ...context.repo, release_id, draft: false, make_latest: 'true',
+            });
+            await core.summary.addLink('Download release', release.data.html_url).write();

@@ -10,8 +10,8 @@ use market_store::SqliteStore;
 struct Args {
     #[arg(
         long,
-        env = "FAUSTUS_DATABASE",
-        default_value = "faustus.sqlite3",
+        env = "FAUST_DATABASE",
+        default_value = "faust.sqlite3",
         global = true
     )]
     database: PathBuf,
@@ -32,7 +32,7 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
-        #[arg(long, default_value = "Faustus/0.1.0")]
+        #[arg(long, default_value = "Faust/0.1.0")]
         user_agent: String,
         #[arg(long, default_values = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"])]
         allow_origin: Vec<HeaderValue>,
@@ -40,7 +40,7 @@ enum Command {
     IngestOnce {
         #[arg(long)]
         league: String,
-        #[arg(long, default_value = "Faustus/0.1.0")]
+        #[arg(long, default_value = "Faust/0.1.0")]
         user_agent: String,
     },
     Import {
@@ -50,7 +50,7 @@ enum Command {
         file: Option<PathBuf>,
         #[arg(long)]
         replace: bool,
-        #[arg(long, default_value = "Faustus/0.1.0")]
+        #[arg(long, default_value = "Faust/0.1.0")]
         user_agent: String,
     },
 }
@@ -181,16 +181,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             database.get_env(),
-            Some(std::ffi::OsStr::new("FAUSTUS_DATABASE"))
+            Some(std::ffi::OsStr::new("FAUST_DATABASE"))
         );
         let args = Args::try_parse_from([
             "market-service",
             "--database",
-            r"D:\Faustus\faustus.sqlite3",
+            r"D:\Faust\faust.sqlite3",
             "serve",
         ])
         .unwrap();
-        assert_eq!(args.database, PathBuf::from(r"D:\Faustus\faustus.sqlite3"));
+        assert_eq!(args.database, PathBuf::from(r"D:\Faust\faust.sqlite3"));
         assert!(args.economy_database.is_none());
     }
 

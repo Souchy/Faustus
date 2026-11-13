@@ -17,10 +17,10 @@ async function start(): Promise<void> {
 }
 
 void start().catch((error: unknown) => {
-  console.error('Unable to start Faustus', error);
+  console.error('Unable to start Faust', error);
   const host = document.querySelector('market-app');
   if (host) {
-    host.textContent = `Unable to start Faustus: ${error instanceof Error ? error.message : String(error)}`;
+    host.textContent = `Unable to start Faust: ${error instanceof Error ? error.message : String(error)}`;
     host.setAttribute('role', 'alert');
   }
 });

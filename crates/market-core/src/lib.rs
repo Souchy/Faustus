@@ -143,7 +143,7 @@ impl LeagueId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PriceSource {
-    FaustusExchange,
+    FaustExchange,
     PoeNinjaStash,
 }
 
@@ -162,10 +162,10 @@ pub struct PriceComparison {
     pub league: LeagueId,
     pub instrument: InstrumentId,
     pub quote_currency: InstrumentId,
-    pub faustus_amount: Decimal,
+    pub faust_amount: Decimal,
     pub stash_amount: Decimal,
     pub percent_difference: Decimal,
-    pub faustus_observed_at: DateTime<Utc>,
+    pub faust_observed_at: DateTime<Utc>,
     pub stash_observed_at: DateTime<Utc>,
 }
 
@@ -177,7 +177,7 @@ pub enum ComparisonError {
     DifferentLeague,
     #[error("quotes must use the same quote currency")]
     DifferentQuoteCurrency,
-    #[error("expected one Faustus quote and one poe.ninja stash quote")]
+    #[error("expected one Faust quote and one poe.ninja stash quote")]
     UnexpectedSources,
     #[error("quote amounts must be positive")]
     NonPositiveAmount,
@@ -195,25 +195,24 @@ impl PriceComparison {
             return Err(ComparisonError::DifferentQuoteCurrency);
         }
 
-        let (faustus, stash) = match (first.source, second.source) {
-            (PriceSource::FaustusExchange, PriceSource::PoeNinjaStash) => (first, second),
-            (PriceSource::PoeNinjaStash, PriceSource::FaustusExchange) => (second, first),
+        let (faust, stash) = match (first.source, second.source) {
+            (PriceSource::FaustExchange, PriceSource::PoeNinjaStash) => (first, second),
+            (PriceSource::PoeNinjaStash, PriceSource::FaustExchange) => (second, first),
             _ => return Err(ComparisonError::UnexpectedSources),
         };
 
-        if faustus.amount <= Decimal::ZERO || stash.amount <= Decimal::ZERO {
+        if faust.amount <= Decimal::ZERO || stash.amount <= Decimal::ZERO {
             return Err(ComparisonError::NonPositiveAmount);
         }
 
         Ok(Self {
-            league: faustus.league.clone(),
-            instrument: faustus.instrument.clone(),
-            quote_currency: faustus.quote_currency.clone(),
-            faustus_amount: faustus.amount,
+            league: faust.league.clone(),
+            instrument: faust.instrument.clone(),
+            quote_currency: faust.quote_currency.clone(),
+            faust_amount: faust.amount,
             stash_amount: stash.amount,
-            percent_difference: (faustus.amount / stash.amount - Decimal::ONE)
-                * Decimal::ONE_HUNDRED,
-            faustus_observed_at: faustus.observed_at,
+            percent_difference: (faust.amount / stash.amount - Decimal::ONE) * Decimal::ONE_HUNDRED,
+            faust_observed_at: faust.observed_at,
             stash_observed_at: stash.observed_at,
         })
     }
@@ -246,11 +245,11 @@ mod tests {
 
     #[test]
     fn comparison_is_directional_and_order_independent() {
-        let faustus = quote(PriceSource::FaustusExchange, Decimal::from(120));
+        let faust = quote(PriceSource::FaustExchange, Decimal::from(120));
         let stash = quote(PriceSource::PoeNinjaStash, Decimal::from(100));
 
-        let forward = PriceComparison::from_quotes(&faustus, &stash).unwrap();
-        let reverse = PriceComparison::from_quotes(&stash, &faustus).unwrap();
+        let forward = PriceComparison::from_quotes(&faust, &stash).unwrap();
+        let reverse = PriceComparison::from_quotes(&stash, &faust).unwrap();
 
         assert_eq!(forward.percent_difference, Decimal::from(20));
         assert_eq!(reverse, forward);
@@ -258,19 +257,19 @@ mod tests {
 
     #[test]
     fn comparison_rejects_different_instruments() {
-        let faustus = quote(PriceSource::FaustusExchange, Decimal::from(120));
+        let faust = quote(PriceSource::FaustExchange, Decimal::from(120));
         let mut stash = quote(PriceSource::PoeNinjaStash, Decimal::from(100));
         stash.instrument = InstrumentId::new("Divine Orb");
 
         assert_eq!(
-            PriceComparison::from_quotes(&faustus, &stash),
+            PriceComparison::from_quotes(&faust, &stash),
             Err(ComparisonError::DifferentInstrument)
         );
     }
 
     #[test]
     fn decimal_amounts_serialize_as_strings() {
-        let quote = quote(PriceSource::FaustusExchange, Decimal::new(125, 2));
+        let quote = quote(PriceSource::FaustExchange, Decimal::new(125, 2));
         let json = serde_json::to_value(quote).unwrap();
 
         assert_eq!(json["amount"], "1.25");

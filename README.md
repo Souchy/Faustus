@@ -1,6 +1,6 @@
-# Faustus
+# Faust
 
-Faustus records and inspects Path of Exile economy data. The Rust workspace contains poe.ninja economy collection, historical dump imports, SQLite storage, and a market service. The Aurelia v2/TypeScript frontend runs in a browser or a Tauri v2 desktop shell. The previous GPUI implementation and legacy GGG integration are preserved in `crates/market-ui-deprecated` and the Rust crates, but normal service operation no longer collects GGG exchange history.
+Faust records and inspects Path of Exile economy data. The Rust workspace contains poe.ninja economy collection, historical dump imports, SQLite storage, and a market service. The Aurelia v2/TypeScript frontend runs in a browser or a Tauri v2 desktop shell. The previous GPUI implementation and legacy GGG integration are preserved in `crates/market-ui-deprecated` and the Rust crates, but normal service operation no longer collects GGG exchange history.
 
 ## Run Locally
 
@@ -20,7 +20,7 @@ Start the backend and Windows Tauri app together:
 .\scripts\dev.ps1
 ```
 
-The development script builds and starts the loopback backend, waits for its health endpoint, then launches Tauri/Vite in the foreground. Closing the desktop app stops the development backend. Service logs are written under `$env:TEMP\Faustus`. Use `.\scripts\dev.ps1 -Web` to start the same service with the browser frontend at `http://127.0.0.1:5173`, or `-Deprecated` to launch GPUI instead.
+The development script builds and starts the loopback backend, waits for its health endpoint, then launches Tauri/Vite in the foreground. Closing the desktop app stops the development backend. Service logs are written under `$env:TEMP\Faust`. Use `.\scripts\dev.ps1 -Web` to start the same service with the browser frontend at `http://127.0.0.1:5173`, or `-Deprecated` to launch GPUI instead.
 
 The client loads the poe.ninja economy leagues, uses the service's valid selection or defaults to the first entry (the current temporary softcore trade league), and tells the service which league to watch. The service validates that selection and starts collecting immediately. Changing the dropdown switches the collector to the newly selected league. League options are cached by the service for 15 minutes.
 
@@ -45,7 +45,60 @@ cd crates\market-ui
 npm run tauri -- dev
 ```
 
-Use `npm run dev` instead for the browser frontend. Vite proxies `/api` and `/health` to `http://127.0.0.1:8787`; both clients use ordinary HTTP `fetch`, not Tauri commands or an HTTP plugin. The packaged desktop app also requires an independently running market service; it does not start, bundle, or stop one.
+Use `npm run dev` instead for the browser frontend. Vite proxies `/api` and `/health` to `http://127.0.0.1:8787`; both clients use ordinary HTTP `fetch`, not Tauri commands or an HTTP plugin. Development builds use the external service. Packaged release builds run the same backend inside the desktop process and stop it when the application exits; no separate service executable or setup is needed.
+
+## Distribution (Windows)
+
+From `crates\market-ui`, run `npm run tauri -- build` after installing the development prerequisites above. Distribute the generated NSIS setup executable from `target\release\bundle\nsis` (or the corresponding directory under your configured Cargo target directory). Users do not need Rust, Node.js, npm, or a separately running backend. The installer uses Tauri's default WebView2 bootstrapper when the runtime is missing; first-time installation may need internet access.
+
+The installer contains the application, frontend assets, and database schema, **not your local database, downloaded archives, or saved prices**. A new installation creates an empty database at `%APPDATA%\com.faust.market\faust.sqlite3`. Each Windows user has their own data, retained across app restarts and upgrades. Packaged builds deliberately do not use the development working-directory database or `FAUST_DATABASE` / `FAUST_ECONOMY_DATABASE`.
+
+- **Live league:** the app selects the current available league on launch, fetches immediately, and collects economy/gem snapshots every 15 minutes while open. Changing the live selection switches collection. Browsing historical data keeps the last live league collecting. Collection stops when the app closes; it is not a Windows background service.
+- **Historical leagues:** open **Settings → Historical datasets**, then click **Import** only for the leagues you want. This downloads the published poe.ninja archive and imports it locally, with status/progress and retry errors shown there. **Discover dumps** fetches only the catalog, not league histories. Completed datasets become available in **League / dataset** and remain saved for future launches.
+- **First run:** internet access is required for the live league catalog/prices and optional archive downloads. No historical leagues are automatically imported. Downloaded archives can consume substantially more disk space after import.
+- **Local backend:** release builds listen only on `127.0.0.1:8787`. Close other Faust instances or development services before launching; a port conflict or database startup failure shows an error dialog rather than connecting to another process's data.
+
+The application identifier is `com.faust.market`, the database is `faust.sqlite3`, and environment variables use the `FAUST_*` prefix. The GGG HTTP client crate is `faust-fetch`; the deprecated binary is `faust-desktop-deprecated`. All releases and updater metadata use the `Souchy/Faust` repository.
+
+Custom launch commands and persisted environment settings use `FAUST_DATABASE` / `FAUST_ECONOMY_DATABASE`. Explicit custom database filenames remain supported. Databases at other locations are not automatically discovered or migrated. Keep using the same updater signing key and GitHub secrets for future releases.
+
+Do not distribute the repository folder or your `faust.sqlite3` files as the application package. Historical downloads retain their published poe.ninja CC BY-SA attribution.
+
+### GitHub Releases and Installer Updates
+
+The **Release Windows installer** GitHub Actions workflow is **manual only**, and runs from `main`. It reads the application version from `crates\market-ui\package.json`; Tauri reads that same file directly. Rust crate versions are internal package versions, not the installer/update version. Use stable versions such as `0.1.1`, without a `v` prefix or prerelease suffix.
+
+One-time setup (keep the same signing key for all future releases):
+
+1. Make this repository and its release assets public. Private GitHub assets require authentication and are not supported by this updater; do not embed a GitHub token in the app.
+2. Generate a password-protected updater key **outside the repository**, from `crates\market-ui`:
+
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\.tauri" | Out-Null
+   npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\faust.key"
+   ```
+
+   Follow the password prompts. Back up the private key and password securely; losing them prevents updates to already-installed releases. Never commit or share the private key.
+3. In the repository's **Settings → Secrets and variables → Actions**, add:
+   - **Secret** `TAURI_SIGNING_PRIVATE_KEY`: the full contents of the generated `faust.key`.
+   - **Secret** `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: its password.
+   - **Variable** `TAURI_UPDATER_PUBLIC_KEY`: the full contents of `faust.key.pub` (the public key, not its path).
+4. Ensure GitHub Actions can create releases using the workflow's `contents: write` permission.
+
+For each release:
+
+```powershell
+cd crates\market-ui
+npm version patch --no-git-tag-version   # Or: npm version 0.2.0 --no-git-tag-version
+```
+
+Commit and push the updated `package.json` **and** `package-lock.json`, along with the application changes. Then open **Actions → Release Windows installer → Run workflow → main**. Do not create the tag yourself: the workflow creates `v<version>` from the selected commit.
+
+The workflow tests the app, builds the Windows x64 NSIS installer, signs the update artifact, and uploads the installer, its `.sig`, and `latest.json` to a draft release. It publishes and marks that release latest only after the required assets are uploaded. An already-published version is skipped, never overwritten; a version older than or equal to latest is rejected. An orphaned tag or unfinished draft fails explicitly: inspect and delete that draft/tag before retrying the same version, or bump the version. Failed builds before release creation can simply be retried.
+
+GitHub-built releases check `https://github.com/Souchy/Faust/releases/latest/download/latest.json` on launch. Newer versions prompt **Update now / Later**; no installer downloads or runs without confirmation. **Help → Check for updates...** retries manually and reports up-to-date/network errors. Downloads must pass Tauri's signature verification before installation. Windows shows installation progress and restarts the app; the per-user database is retained. An interrupted historical import may need Retry afterward.
+
+Ordinary local builds leave the public key empty and do not generate signed update artifacts or check on launch; the manual check explains that updates are unconfigured. Install the first GitHub-built release manually to bootstrap updating, including when replacing an older installer without updater support. Update signing is separate from Windows Authenticode signing: these installers may still show SmartScreen warnings.
 
 The **Current prices** tab is an economy workspace with grouped General, Items, Uniques, Atlas, and Crafting navigation. It covers the supported PoE 1 economy categories, with Exchange/Stash source switching where the public API supports both. Search is category-local and independent of Gem flipping. Tables support sorting, 100-row batches, native/Chaos/Divine quotes, variant details, recent trend charts, and category-specific filters for item type, gem level/quality, links, corruption, map tier, and listing counts where supplied. Clear filters appears only when category-specific filter controls are available, not for search and quote alone. The category navigation, heading, filters, item list and item details scroll together within the Current prices page; the shared app header remains accessible. Empty, failed, and unsupported source combinations are explicit. Prices are aggregate estimates, not executable buy/sell orders.
 
@@ -95,7 +148,7 @@ Analyze reloads the known datetime bounds after imports and clamps valid entered
 
 Each ranked row displays starting-hour → ending-hour item-unit volume for its selected GGG pair, not a period total or quote-currency volume. poe.ninja/archive rows show **Unknown** rather than a fabricated zero.
 
-poe.ninja dump rows also show the provider's confidence at the start and end observations (`High`, `Medium`, `Low`, or **Unknown**); this is not traded volume or a confidence score invented by Faustus. GGG confidence is not applicable. Confidence is saved per observation in a compact side table, rather than taken from an item's latest metadata.
+poe.ninja dump rows also show the provider's confidence at the start and end observations (`High`, `Medium`, `Low`, or **Unknown**); this is not traded volume or a confidence score invented by Faust. GGG confidence is not applicable. Confidence is saved per observation in a compact side table, rather than taken from an item's latest metadata.
 
 **Minimum poe.ninja confidence** mirrors the GGG minimum-volume filter: it applies only to poe.ninja/archive rows, leaving GGG rows unaffected. Either the actual starting **or** ending observation can meet the chosen confidence/volume threshold. `Low or higher`, `Medium or higher`, and `High only` accept a row when at least one observation qualifies; Unknown cannot qualify by itself, but does not disqualify a known qualifying opposite endpoint. The default **All confidence levels** includes Unknown. These filters use endpoints, not period averages; confidence labels are not averaged numerically. Filtering happens globally before category totals, ranking and pagination, including when items start later than the selected period start. The choice persists across page navigation; the flips API accepts `min_confidence=Low|Medium|High`.
 
@@ -106,7 +159,7 @@ After the ranking appears, a separate cancellable batch loads historical Chaos s
 Older imports did not retain the CSV `Confidence` column. Restore it without changing prices or rerunning a full import:
 
 ```powershell
-market-service --database D:\Faustus\faustus.sqlite3 backfill-confidence --name Allflame --file G:\Downloads\Allflame
+market-service --database D:\Faust\faust.sqlite3 backfill-confidence --name Allflame --file G:\Downloads\Allflame
 ```
 
 `--file` accepts either a dump ZIP or a directory containing the exact `<archive>.currency.csv` and `<archive>.items.csv` files. Only observations matching the completed import's league, identity, date, currency, archive and existing price are enriched. Unknown/mismatched values are not guessed; skipped CSV rows are reported. Future imports retain confidence automatically.
@@ -138,25 +191,25 @@ cargo run -p market-service -- import --name "Ancestors" --file "C:\data\Ancesto
 cargo run -p market-service -- import --name "Ancestors" --replace
 ```
 
-Use one database for live economy updates, historical dumps, and saved Gem flipping snapshots. `--database` selects it for every command; `FAUSTUS_DATABASE` provides a shared environment default. Without either, the default is `faustus.sqlite3` in the working directory.
+Use one database for live economy updates, historical dumps, and saved Gem flipping snapshots. `--database` selects it for every command; `FAUST_DATABASE` provides a shared environment default. Without either, the default is `faust.sqlite3` in the working directory.
 
 ```powershell
-cargo run -p market-service -- --database "D:\Faustus\faustus.sqlite3" serve
-cargo run -p market-service -- --database "D:\Faustus\faustus.sqlite3" import --name "Mirage"
-.\scripts\dev.ps1 -Web -Database "D:\Faustus\faustus.sqlite3"
+cargo run -p market-service -- --database "D:\Faust\faust.sqlite3" serve
+cargo run -p market-service -- --database "D:\Faust\faust.sqlite3" import --name "Mirage"
+.\scripts\dev.ps1 -Web -Database "D:\Faust\faust.sqlite3"
 # Optional persistent default for new terminal sessions:
-[Environment]::SetEnvironmentVariable("FAUSTUS_DATABASE", "D:\Faustus\faustus.sqlite3", "User")
+[Environment]::SetEnvironmentVariable("FAUST_DATABASE", "D:\Faust\faust.sqlite3", "User")
 ```
 
-The development launcher reads `FAUSTUS_DATABASE` from the process environment or the Windows user setting, so an already-open editor can use the persisted default too. Explicit `-Database` / `--database` arguments override that default. CLI commands launched from an existing terminal need `$env:FAUSTUS_DATABASE` set in that terminal or a new terminal session.
+The development launcher reads `FAUST_DATABASE` from the process environment or the Windows user setting, so an already-open editor can use the persisted default too. Explicit `-Database` / `--database` arguments override that default. CLI commands launched from an existing terminal need `$env:FAUST_DATABASE` set in that terminal or a new terminal session.
 
-The optional `--economy-database` / launcher `-EconomyDatabase` (`FAUSTUS_ECONOMY_DATABASE`) override remains available for deliberately split deployments, but is unnecessary for the single-database setup. A separate economy store uses SQLite WAL with NORMAL synchronous mode and bounded per-connection caches for bulk imports: it remains crash-consistent, but an OS/power failure can lose the newest uncheckpointed observations, which can be recollected or reimported. A unified store uses the main database's unchanged durability settings. Allow space for the database, WAL, archive downloads, SQLite temporary files, and build artifacts. Parent directories for a custom database must already exist.
+The optional `--economy-database` / launcher `-EconomyDatabase` (`FAUST_ECONOMY_DATABASE`) override remains available for deliberately split deployments, but is unnecessary for the single-database setup. A separate economy store uses SQLite WAL with NORMAL synchronous mode and bounded per-connection caches for bulk imports: it remains crash-consistent, but an OS/power failure can lose the newest uncheckpointed observations, which can be recollected or reimported. A unified store uses the main database's unchanged durability settings. Allow space for the database, WAL, archive downloads, SQLite temporary files, and build artifacts. Parent directories for a custom database must already exist.
 
 An upgrade of an already populated economy store may rebuild indexes on its first startup. Start the service separately and wait for its listening message before opening the client; do not interrupt that migration. Later starts reuse the persisted indexes and category catalog.
 
 Published dumps provide daily stash estimates, not 15-minute backfill, exchange volume, or listing/sample counts. Only Chaos-quoted currency rows are imported; differently directed quotes are explicitly counted as exclusions, not silently inverted or merged. Unknown historical categories remain browsable under Historical. Original link ranges such as `1-4 links` are kept as ranges, not treated as an exact four-link price. Dumps do not become Gem flipping snapshots: their confidence/variant coverage cannot reconstruct a complete same-instant gem/material bundle.
 
-**Attribution:** historical data is provided by poe.ninja under the **CC BY-SA** license stated on its [data page](https://poe.ninja/poe1/data). Import records retain source URLs, checksums, license attribution, coverage, counts and exclusions. Retain the source attribution and applicable share-alike terms when redistributing imported data. Faustus's own source-code license is unchanged.
+**Attribution:** historical data is provided by poe.ninja under the **CC BY-SA** license stated on its [data page](https://poe.ninja/poe1/data). Import records retain source URLs, checksums, license attribution, coverage, counts and exclusions. Retain the source attribution and applicable share-alike terms when redistributing imported data. Faust's own source-code license is unchanged.
 
 The Gem flipping page compares poe.ninja SkillGem variants by level, quality, and corruption. Its shared search filters all three strategies, and clicking a gem row carries that gem into the search when switching strategies. The **As of** selector defaults to **Latest**, followed by locally saved instants, newest first. Buy, sell, confidence counts, and automatic material prices all come from the selected snapshot, not different sparkline endpoints; manual material overrides are optional. Each snapshot preserves the latest known gem and currency overviews together, including their separate fetch times; the feeds are not necessarily updated simultaneously. The Current prices tab always uses current data, even when viewing a saved gem instant. Changing leagues resets the instant to Latest; refreshing the same league preserves a pinned instant.
 
@@ -216,12 +269,12 @@ cargo run -p market-service -- serve --allow-origin https://your-frontend.exampl
 
 `--allow-origin` can be repeated; supplying it replaces the default desktop origins (`tauri://localhost`, `http://tauri.localhost`, and `https://tauri.localhost`). CORS permits GET/POST and JSON Content-Type, without credentials or wildcard origins. Same-origin web requests and Vite's development proxy do not require extra CORS origins.
 
-Desktop packaging uses `.env.desktop` to point directly at `http://127.0.0.1:8787`. Override `VITE_API_BASE_URL` when building for another service, and also update `connect-src` in `src-tauri/tauri.conf.json` to allow that exact service origin. No Tauri command capabilities are granted. A remote API should use HTTPS. The service is still unauthenticated and its collector selection is global: CORS is not authentication, and a public multi-user deployment needs access control and a decision about collector ownership before exposing selection or ingestion.
+Desktop packaging uses `.env.desktop` to point directly at its in-process backend at `http://127.0.0.1:8787`. No Tauri command capabilities are granted to the frontend; native startup/shutdown error dialogs are invoked only by Rust. Custom remote deployments should use the web build rather than redirecting the self-contained desktop package. A remote API should use HTTPS. The service is still unauthenticated and its collector selection is global: CORS is not authentication, and a public multi-user deployment needs access control and a decision about collector ownership before exposing selection or ingestion.
 
 The GPUI crate and its tests remain available:
 
 ```powershell
-cargo run -p market-ui-deprecated --bin faustus-desktop-deprecated
+cargo run -p market-ui-deprecated --bin faust-desktop-deprecated
 cargo test -p market-ui-deprecated
 ```
 
@@ -262,7 +315,7 @@ This product isn't affiliated with or endorsed by Grinding Gear Games in any way
 ## Workspace
 
 - `market-core`: shared identifiers, exact decimal quotes, comparisons, and API types.
-- `faustus-fetch`: GGG hourly/cursor-page HTTP client.
+- `faust-fetch`: GGG hourly/cursor-page HTTP client.
 - `ninja-fetch`: documented economy client, ETag handling, and overview DTOs.
 - `market-store`: SQLite migrations, compact hourly market/coverage storage, legacy cursor recording, economy/import history, and gem snapshots.
 - `market-service`: local economy and analysis HTTP APIs, resumable hourly imports, scheduled poe.ninja collectors, and ingestion/import CLI.

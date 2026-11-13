@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Faustus",
-  "version": "0.1.0",
-  "identifier": "com.faustus.market",
+  "productName": "Faust",
+  "version": "../package.json",
+  "identifier": "com.faust.market",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:5173",
@@ -13,7 +13,8 @@
     "windows": [
       {
         "label": "main",
-        "title": "Faustus",
+        "create": false,
+        "title": "Faust",
         "width": 1200,
         "height": 800,
         "minWidth": 720,
@@ -29,5 +30,14 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico", "icons/icon.png"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": ["https://github.com/Souchy/Faust/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

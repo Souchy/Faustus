@@ -666,7 +666,7 @@ test('main tabs, league, refresh and settings share one row without a branding h
   await service(page);
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
-  await expect(page.getByText('Faustus', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Faust', { exact: true })).toHaveCount(0);
   const header = page.locator('.app-header');
   await expect(header.getByRole('navigation', { name: 'Market pages' })).toBeVisible();
   for (const width of [1280, 720, 390]) {

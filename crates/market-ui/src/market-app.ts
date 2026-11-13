@@ -19,7 +19,7 @@ export class MarketApp {
 
   getRouteConfig(): IRouteConfig {
     return {
-      title: 'Faustus',
+      title: 'Faust',
       routes: [
         { path: '', redirectTo: 'prices' },
         { path: 'prices', component: CurrentPrices, title: 'Current prices' },

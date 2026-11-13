@@ -11,7 +11,7 @@ use axum::{
     routing::get,
 };
 use chrono::Utc;
-use faustus_fetch::{FaustusClient, FetchError as FaustusFetchError};
+use faust_fetch::{FaustClient, FetchError as FaustFetchError};
 use market_core::{
     CurrentExchangePriceLine, CurrentExchangePriceOverview, ExchangeMarketSnapshot,
     ExchangePriceCurrency, GemAnalysisData, GemAnalysisOverview, GemMarketLine, GemMarketOverview,
@@ -115,7 +115,7 @@ pub struct IngestSummary {
 #[derive(Debug, Error)]
 pub enum IngestError {
     #[error(transparent)]
-    Faustus(#[from] FaustusFetchError),
+    Faust(#[from] FaustFetchError),
     #[error(transparent)]
     Ninja(#[from] NinjaFetchError),
     #[error(transparent)]
@@ -154,9 +154,9 @@ pub async fn ingest_once(
     league_id: &str,
     user_agent: &str,
 ) -> Result<IngestSummary, IngestError> {
-    let faustus = FaustusClient::new(user_agent)?;
+    let faust = FaustClient::new(user_agent)?;
     let ninja = NinjaClient::new(user_agent)?;
-    let exchange = record_next_exchange_page(store, &faustus).await?;
+    let exchange = record_next_exchange_page(store, &faust).await?;
     let (ninja_currency_lines, ninja_fragment_lines, ninja_not_modified) =
         refresh_ninja_overviews(store, &ninja, league_id).await?;
 
@@ -177,7 +177,7 @@ struct RecordedExchangePage {
 
 async fn record_next_exchange_page(
     store: &SqliteStore,
-    client: &FaustusClient,
+    client: &FaustClient,
 ) -> Result<RecordedExchangePage, IngestError> {
     let requested_cursor = store.exchange_cursor().await?;
     let fetched_page = client.fetch_page(requested_cursor).await?;
@@ -255,7 +255,7 @@ async fn refresh_ninja_overviews(
 
 fn retry_delay(error: &IngestError) -> Duration {
     match error {
-        IngestError::Faustus(FaustusFetchError::HttpStatus {
+        IngestError::Faust(FaustFetchError::HttpStatus {
             retry_after: Some(seconds),
             ..
         }) => seconds
@@ -271,7 +271,7 @@ pub async fn run_periodic_collector(
     mut selected_league: watch::Receiver<Option<String>>,
     user_agent: String,
 ) {
-    let faustus = match FaustusClient::new(&user_agent) {
+    let faust = match FaustClient::new(&user_agent) {
         Ok(client) => client,
         Err(error) => {
             eprintln!("Unable to initialize GGG collector: {error}");
@@ -298,7 +298,7 @@ pub async fn run_periodic_collector(
             let mut backoff = EXCHANGE_BATCH_RETRY_DELAY;
 
             for page_index in 0..EXCHANGE_PAGES_PER_BATCH {
-                match record_next_exchange_page(&store, &faustus).await {
+                match record_next_exchange_page(&store, &faust).await {
                     Ok(page) => {
                         caught_up = page.caught_up;
                         eprintln!(

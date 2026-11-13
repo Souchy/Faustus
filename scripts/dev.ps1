@@ -2,22 +2,22 @@
 param(
     [switch]$Web,
     [switch]$Deprecated,
-    [string]$Database = $env:FAUSTUS_DATABASE,
-    [string]$EconomyDatabase = $env:FAUSTUS_ECONOMY_DATABASE
+    [string]$Database = $env:FAUST_DATABASE,
+    [string]$EconomyDatabase = $env:FAUST_ECONOMY_DATABASE
 )
 
 $ErrorActionPreference = "Stop"
 
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $frontendRoot = Join-Path $workspaceRoot "crates\market-ui"
-$logDirectory = Join-Path $env:TEMP "Faustus"
+$logDirectory = Join-Path $env:TEMP "Faust"
 $stdoutLog = Join-Path $logDirectory "market-service.stdout.log"
 $stderrLog = Join-Path $logDirectory "market-service.stderr.log"
-$userAgent = "Faustus/0.1.0"
+$userAgent = "Faust/0.1.0"
 $quotedUserAgent = '"' + $userAgent + '"'
 $serviceArguments = "serve --user-agent $quotedUserAgent"
 if (-not $Database) {
-    $Database = [Environment]::GetEnvironmentVariable("FAUSTUS_DATABASE", "User")
+    $Database = [Environment]::GetEnvironmentVariable("FAUST_DATABASE", "User")
 }
 if ($Database) {
     $serviceArguments += ' --database "' + $Database + '"'
@@ -100,7 +100,7 @@ try {
     Push-Location $launchDirectory
     try {
         if ($Deprecated) {
-            & cargo run -p market-ui-deprecated --bin faustus-desktop-deprecated
+            & cargo run -p market-ui-deprecated --bin faust-desktop-deprecated
         } elseif ($Web) {
             & npm run dev
         } else {

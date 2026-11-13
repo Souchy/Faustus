@@ -485,7 +485,7 @@ mod tests {
 
     use super::*;
 
-    fn exchange_page(hour: i64, traded: bool) -> faustus_fetch::ExchangePage {
+    fn exchange_page(hour: i64, traded: bool) -> faust_fetch::ExchangePage {
         let market = serde_json::json!({
             "league":"Test","market_id":"a|b","market_pair":["a","b"],
             "volume_traded":{"a":1,"b":2},"lowest_stock":{"a":1,"b":1},

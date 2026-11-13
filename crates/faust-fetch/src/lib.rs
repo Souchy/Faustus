@@ -77,11 +77,11 @@ pub enum FetchError {
 }
 
 #[derive(Clone, Debug)]
-pub struct FaustusClient {
+pub struct FaustClient {
     http: Client,
 }
 
-impl FaustusClient {
+impl FaustClient {
     pub fn new(user_agent: &str) -> Result<Self, FetchError> {
         let http = Client::builder()
             .user_agent(user_agent)

@@ -9,7 +9,7 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "faustus-desktop-deprecated"
+name = "faust-desktop-deprecated"
 path = "src/main.rs"
 
 [dependencies]
