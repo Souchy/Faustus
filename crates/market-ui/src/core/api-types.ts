@@ -1,4 +1,4 @@
-// Mirrors the JSON DTOs in market-core; decimal prices remain strings on the wire.
+// Mirrors the service JSON DTOs; decimal prices remain strings on the wire.
 export interface LeagueOption {
   id: string;
   name: string;
@@ -158,6 +158,9 @@ export interface EconomyArchive {
   status: 'available' | 'queued' | 'downloading' | 'importing' | 'completed' | 'failed';
   rows: number;
   skipped: number;
+  downloaded_bytes: number;
+  download_total_bytes: number | null;
+  total_rows: number | null;
   error: string | null;
   start: string | null;
   end: string | null;
@@ -165,6 +168,8 @@ export interface EconomyArchive {
   progress: string;
   license: string;
   url: string;
+  ggg?: GggArchiveImport | null;
+  ggg_error?: string | null;
 }
 export interface GggItem { id: string; name: string; category: string; icon: string | null }
 export interface GggMarket {
@@ -185,6 +190,9 @@ export interface GggImportJob {
   completed_hours: number; total_hours: number; error: string | null;
   warning?: string | null;
   platform?: 'PC';
+}
+export interface GggArchiveImport extends Omit<GggImportJob, 'status'> {
+  status: GggImportJob['status'] | 'available' | 'partial';
 }
 export interface PairAlternative {
   start_observed_at?: string; end_observed_at?: string;

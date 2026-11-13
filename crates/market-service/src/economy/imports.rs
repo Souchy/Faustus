@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     str::FromStr,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::NaiveDate;
@@ -98,9 +98,13 @@ async fn run(
     entry.status = "downloading".into();
     entry.rows = 0;
     entry.skipped = 0;
+    entry.downloaded_bytes = 0;
+    entry.download_total_bytes = None;
+    entry.total_rows = None;
     entry.error = None;
     entry.start = None;
     entry.end = None;
+    entry.progress = "Connecting to poe.ninja archive.".into();
     state.economy_store.save_economy_import(entry, None).await?;
     let mut temporary = tempfile::NamedTempFile::new()?;
     if let Some(path) = local {
@@ -120,20 +124,33 @@ async fn run(
             .send()
             .await?
             .error_for_status()?;
-        if response
-            .content_length()
-            .is_some_and(|size| size > MAX_DOWNLOAD)
-        {
+        let total = response.content_length();
+        if total.is_some_and(|size| size > MAX_DOWNLOAD) {
             return Err("Archive exceeds the 256 MiB compressed limit.".into());
         }
+        entry.download_total_bytes = total;
+        entry.progress = "Downloading poe.ninja archive.".into();
+        state.economy_store.save_economy_import(entry, None).await?;
         let mut size = 0_u64;
+        let mut last_saved_size = 0_u64;
+        let mut last_saved_at = Instant::now();
         while let Some(chunk) = response.chunk().await? {
             size += chunk.len() as u64;
             if size > MAX_DOWNLOAD {
                 return Err("Archive exceeds the 256 MiB compressed limit.".into());
             }
             temporary.write_all(&chunk)?;
+            entry.downloaded_bytes = size;
+            if size - last_saved_size >= 1024 * 1024
+                || last_saved_at.elapsed() >= Duration::from_secs(1)
+            {
+                state.economy_store.save_economy_import(entry, None).await?;
+                last_saved_size = size;
+                last_saved_at = Instant::now();
+            }
         }
+        entry.downloaded_bytes = size;
+        state.economy_store.save_economy_import(entry, None).await?;
     }
     temporary.flush()?;
     let mut file = temporary.reopen()?;
@@ -148,7 +165,13 @@ async fn run(
     }
     let checksum = format!("{:x}", hash.finalize());
     entry.status = "importing".into();
-    entry.progress = "Reading softcore currency and item CSVs.".into();
+    entry.progress = "Archive downloaded. Counting CSV records before import...".into();
+    state.economy_store.save_economy_import(entry, None).await?;
+    let file = temporary.reopen()?;
+    let name = entry.name.clone();
+    let total_rows = tokio::task::spawn_blocking(move || count_zip_records(file, &name)).await??;
+    entry.total_rows = Some(total_rows);
+    entry.progress = format!("0 / {total_rows} CSV rows processed.");
     let previous_checksum = state
         .economy_store
         .economy_import_checksum(&entry.name)
@@ -208,8 +231,10 @@ async fn run(
             *reasons.entry(reason).or_default() += count;
         }
         entry.progress = format!(
-            "{} observations imported; {} rows excluded.",
-            entry.rows, entry.skipped
+            "{} / {total_rows} CSV rows processed; {} observations imported; {} rows excluded.",
+            entry.rows + entry.skipped,
+            entry.rows,
+            entry.skipped
         );
         state.economy_store.save_economy_import(entry, None).await?;
     }
@@ -219,6 +244,9 @@ async fn run(
         return Err(error.into());
     }
     parsed?;
+    if entry.rows + entry.skipped != total_rows {
+        return Err("Processed CSV record count does not match the archive total.".into());
+    }
     if entry.rows == 0 {
         return Err("No valid softcore challenge observations were found in this archive.".into());
     }
@@ -253,11 +281,36 @@ struct Batch {
 
 fn parse_zip(file: File, league: &str, sender: mpsc::Sender<Batch>) -> Result<(), ImportError> {
     let mut archive = zip::ZipArchive::new(file)?;
+    for (index, kind) in selected_csvs(&mut archive, league)? {
+        let file = archive.by_index(index)?;
+        let name = file.name().to_owned();
+        parse_csv(file, &name, kind, league, &sender)?;
+    }
+    Ok(())
+}
+
+fn count_zip_records(file: File, league: &str) -> Result<u64, ImportError> {
+    let mut archive = zip::ZipArchive::new(file)?;
+    let mut total = 0;
+    for (index, _) in selected_csvs(&mut archive, league)? {
+        let mut reader = csv_reader(archive.by_index(index)?);
+        let mut record = csv::StringRecord::new();
+        while reader.read_record(&mut record)? {
+            total += 1;
+        }
+    }
+    Ok(total)
+}
+
+fn selected_csvs(
+    archive: &mut zip::ZipArchive<File>,
+    league: &str,
+) -> Result<Vec<(usize, &'static str)>, ImportError> {
     if archive.len() > 256 {
         return Err("Archive has too many entries.".into());
     }
     let mut expanded = 0_u64;
-    let mut selected = 0;
+    let mut selected = Vec::new();
     for index in 0..archive.len() {
         let file = archive.by_index(index)?;
         if file.enclosed_name().is_none() {
@@ -277,16 +330,25 @@ fn parse_zip(file: File, league: &str, sender: mpsc::Sender<Batch>) -> Result<()
         } else {
             continue;
         };
-        selected += 1;
-        parse_csv(file, &name, kind, league, &sender)?;
+        selected.push((index, kind));
     }
-    if selected != 2 {
+    if selected.len() != 2
+        || !selected.iter().any(|(_, kind)| *kind == "currency")
+        || !selected.iter().any(|(_, kind)| *kind == "items")
+    {
         return Err(format!(
             "Expected {league}.currency.csv and {league}.items.csv in the archive."
         )
         .into());
     }
-    Ok(())
+    Ok(selected)
+}
+
+fn csv_reader<R: Read>(file: R) -> csv::Reader<R> {
+    csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .trim(csv::Trim::All)
+        .from_reader(file)
 }
 
 fn parse_csv(
@@ -296,10 +358,7 @@ fn parse_csv(
     league: &str,
     sender: &mpsc::Sender<Batch>,
 ) -> Result<(), ImportError> {
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(b';')
-        .trim(csv::Trim::All)
-        .from_reader(file);
+    let mut reader = csv_reader(file);
     let headers = reader.headers()?.clone();
     for required in if kind == "currency" {
         &["League", "Date", "Get", "Pay", "Value"][..]
@@ -551,6 +610,9 @@ mod tests {
             start: None,
             end: None,
             league: None,
+            downloaded_bytes: 0,
+            download_total_bytes: None,
+            total_rows: None,
             progress: String::new(),
             license: "CC BY-SA".into(),
             url: download_url("TestLeague"),
@@ -581,6 +643,57 @@ mod tests {
         zip.finish().unwrap();
     }
 
+    #[test]
+    fn csv_record_total_excludes_headers_and_other_files_and_handles_quoted_newlines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("multiline.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, data) in [
+            ("TestLeague.currency.csv", "League;Date;Get;Pay;Value\n"),
+            (
+                "TestLeague.items.csv",
+                "League;Date;Id;Type;Name;BaseType;Variant;Links;Value\nTestLeague;2026-01-01;42;UniqueWeapon;\"A;\n B\";Axe;;6 links;40\nHardcore TestLeague;2026-01-02;43;UniqueWeapon;Other;Axe;;;60",
+            ),
+            (
+                "Hardcore TestLeague.items.csv",
+                "not a selected CSV\nignored",
+            ),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(data.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        assert_eq!(
+            count_zip_records(File::open(&path).unwrap(), "TestLeague").unwrap(),
+            2
+        );
+        let (sender, mut receiver) = mpsc::channel(2);
+        parse_zip(File::open(&path).unwrap(), "TestLeague", sender).unwrap();
+        let batch = receiver.blocking_recv().unwrap();
+        assert_eq!(batch.observations.len(), 1);
+        assert_eq!(batch.observations[0].line.name, "A;\n B");
+        assert_eq!(batch.reasons.values().sum::<u64>(), 1);
+        assert!(receiver.blocking_recv().is_none());
+    }
+
+    #[test]
+    fn counting_rejects_unsafe_and_malformed_archives() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("invalid.zip");
+        fixture(&path, true);
+        assert!(count_zip_records(File::open(&path).unwrap(), "TestLeague").is_err());
+        let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["TestLeague.currency.csv", "TestLeague.items.csv"] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(b"League;Date\nTestLeague;2026-01-01;extra\n")
+                .unwrap();
+        }
+        zip.finish().unwrap();
+        assert!(count_zip_records(File::open(&path).unwrap(), "TestLeague").is_err());
+    }
+
     #[tokio::test]
     async fn local_zip_import_is_scoped_idempotent_queryable_and_persistent() {
         let directory = tempfile::tempdir().unwrap();
@@ -596,6 +709,11 @@ mod tests {
         assert_eq!(imported.status, "completed");
         assert_eq!(imported.rows, 3);
         assert_eq!(imported.skipped, 2);
+        assert_eq!(imported.total_rows, Some(5));
+        assert_eq!(
+            imported.rows + imported.skipped,
+            imported.total_rows.unwrap()
+        );
         assert_eq!(imported.league.as_deref(), Some("TestLeague"));
         let overview = store
             .historical_economy("TestLeague", "UniqueWeapon", "stash", "2026-01-01")
@@ -641,6 +759,10 @@ mod tests {
             .unwrap();
         assert_eq!(repeated.rows, imported.rows);
         let reopened = market_store::SqliteStore::connect(&database).await.unwrap();
+        assert_eq!(
+            reopened.economy_imports().await.unwrap()[0].total_rows,
+            Some(5)
+        );
         assert_eq!(
             reopened
                 .economy_history("TestLeague", "UniqueWeapon", "stash", id, None)

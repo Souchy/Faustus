@@ -12,7 +12,9 @@
   </form>
   <p if.bind="error" role="alert" class="error">${error}</p>
   <p if.bind="isLoading" role="status">Loading saved hours…</p>
-  <p if.bind="job" role="status">Import ${job.status}: ${job.completed_hours} / ${job.total_hours} hours. Background imports continue when leaving this page.</p>
+  <p if.bind="job" role="status">GGG PC import ${job.status}: ${job.completed_hours} / ${job.total_hours} hours available in the requested range. Already-saved hours count toward coverage. Background imports continue when leaving this page.</p>
+  <progress if.bind="job && job.total_hours > 0" max.bind="job.total_hours" value.bind="job.completed_hours"
+    aria-label="GGG PC import hour coverage"></progress>
   <p if.bind="job?.error" role="alert" class="error">${job.error}</p>
   <p if.bind="job?.warning" role="alert" class="warnings banner">Metadata warning: ${job.warning}. Raw item IDs may be shown where enrichment is unavailable.</p>
   <section if.bind="coverage" aria-label="Import coverage">

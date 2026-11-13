@@ -33,10 +33,10 @@ struct Job {
 }
 
 #[derive(Clone, Deserialize)]
-struct Range {
-    league: String,
-    start: i64,
-    end: i64,
+pub(crate) struct Range {
+    pub league: String,
+    pub start: i64,
+    pub end: i64,
 }
 
 #[derive(Deserialize)]
@@ -173,17 +173,105 @@ async fn start_import(
     Json(query): Json<Range>,
 ) -> Result<Json<ImportJob>, ApiError> {
     validate(&query.league, query.start, query.end)?;
+    start_job(state, query).await.map(Json)
+}
+
+fn range_chunks(range: &Range) -> impl Iterator<Item = (i64, i64)> + '_ {
+    (range.start..=range.end)
+        .step_by((dto::MAX_HOURS * HOUR) as usize)
+        .map(|start| (start, (start + (dto::MAX_HOURS - 1) * HOUR).min(range.end)))
+}
+
+async fn import_coverage(state: &ServiceState, range: &Range) -> Result<dto::Coverage, ApiError> {
+    let mut result = dto::Coverage {
+        league: range.league.clone(),
+        start: range.start,
+        end: range.end,
+        expected_hours: 0,
+        completed_hours: vec![],
+        failed_hours: vec![],
+    };
+    for (start, end) in range_chunks(range) {
+        let coverage = state
+            .store
+            .ggg_coverage(&range.league, start, end)
+            .await
+            .map_err(failure)?;
+        result.expected_hours += coverage.expected_hours;
+        result.completed_hours.extend(coverage.completed_hours);
+        result.failed_hours.extend(coverage.failed_hours);
+    }
+    Ok(result)
+}
+
+pub(crate) async fn archive_status(
+    state: &ServiceState,
+    range: &Range,
+) -> Result<ImportJob, ApiError> {
+    let jobs = state.ggg.jobs.lock().await;
+    let current = jobs.get(&range.league).map(|job| job.dto.clone());
+    drop(jobs);
+    if let Some(job) = &current
+        && job.start == range.start
+        && job.end == range.end
+    {
+        return Ok(job.clone());
+    }
+    let coverage = import_coverage(state, range).await?;
+    let completed = coverage.completed_hours.len() as u64;
+    Ok(ImportJob {
+        league: range.league.clone(),
+        start: range.start,
+        end: range.end,
+        status: if current.as_ref().is_some_and(|job| job.status == "running") {
+            "running"
+        } else if completed == coverage.expected_hours {
+            "completed"
+        } else if !coverage.failed_hours.is_empty() {
+            "failed"
+        } else if completed > 0 {
+            "partial"
+        } else {
+            "available"
+        }.into(),
+        completed_hours: completed,
+        total_hours: coverage.expected_hours,
+        error: coverage.failed_hours.first().map(|failure| format!("Hour {}: {}", failure.hour, failure.error)),
+        warning: current.filter(|job| job.status == "running")
+            .map(|_| "Another GGG range is running for this league; progress here measures full dataset coverage. Wait for it to finish, then retry any remaining hours, or cancel it on Currency Exchange.".into()),
+        platform: "PC".into(),
+    })
+}
+
+pub(crate) async fn start_archive_import(
+    state: ServiceState,
+    query: Range,
+) -> Result<ImportJob, ApiError> {
+    dto::validate_league(&query.league).map_err(bad)?;
+    if query.end < query.start {
+        return Err(bad("Dataset range has no completed hours."));
+    }
+    for (start, end) in range_chunks(&query) {
+        validate(&query.league, start, end)?;
+    }
+    start_job(state, query).await
+}
+
+async fn start_job(state: ServiceState, query: Range) -> Result<ImportJob, ApiError> {
+    if let Some(job) = state.ggg.jobs.lock().await.get(&query.league)
+        && job.dto.status == "running"
+        && job.dto.start == query.start
+        && job.dto.end == query.end
+    {
+        return Ok(job.dto.clone());
+    }
     let permit = IMPORT_LOCK.try_lock().map_err(|_| {
         (
             StatusCode::CONFLICT,
             "Another PC GGG import is active; cancel it or wait for completion.".into(),
         )
     })?;
-    let coverage = state
-        .store
-        .ggg_coverage(&query.league, query.start, query.end)
-        .await
-        .map_err(failure)?;
+    let coverage = import_coverage(&state, &query).await?;
     let (sender, mut receiver) = watch::channel(false);
     let job = ImportJob {
         league: query.league.clone(),
@@ -210,25 +298,39 @@ async fn start_import(
             _=receiver.changed()=>None,
             result=run_import(&state,&query,EXCHANGE_URL)=>Some(result),
         };
-        let coverage = state
-            .store
-            .ggg_coverage(&query.league, query.start, query.end)
-            .await;
-        let metadata = state
-            .store
-            .ggg_metadata_summary(&query.league, query.start, query.end)
-            .await;
+        let coverage = import_coverage(&state, &query).await;
+        let mut metadata_warning = None;
+        for (start, end) in range_chunks(&query) {
+            match state
+                .store
+                .ggg_metadata_summary(&query.league, start, end)
+                .await
+            {
+                Ok((total, unknown, uncategorized)) if unknown > 0 || uncategorized > 0 => {
+                    metadata_warning = Some(format!(
+                        "Partial item metadata in hours {start}..{end}: metadata_unknown={unknown}/{total}; category_unknown={uncategorized}/{total}. Raw identities are retained; no name-based price matching."
+                    ));
+                    break;
+                }
+                Err(error) => {
+                    metadata_warning = Some(format!("Unable to summarize item metadata: {error}"));
+                    break;
+                }
+                _ => {}
+            }
+        }
         let mut jobs = state.ggg.jobs.lock().await;
         if let Some(job) = jobs.get_mut(&query.league) {
-            if let Ok(coverage) = coverage {
-                job.dto.completed_hours = coverage.completed_hours.len() as u64;
+            match coverage {
+                Ok(coverage) => job.dto.completed_hours = coverage.completed_hours.len() as u64,
+                Err(error) => {
+                    job.dto.status = "failed".into();
+                    job.dto.error = Some(format!("Unable to read final GGG coverage: {}", error.1));
+                    eprintln!("GGG import: {}", error.1);
+                    return;
+                }
             }
-            if let Ok((total, unknown, uncategorized)) = metadata
-                && (unknown > 0 || uncategorized > 0)
-            {
-                let summary = format!(
-                    "Partial item metadata: metadata_unknown={unknown}/{total}; category_unknown={uncategorized}/{total}. Raw identities are retained; no name-based price matching."
-                );
+            if let Some(summary) = metadata_warning {
                 job.dto.warning = Some(match job.dto.warning.take() {
                     Some(warning) => format!("{warning} {summary}"),
                     None => summary,
@@ -246,15 +348,13 @@ async fn start_import(
             }
         }
     });
-    Ok(Json(job))
+    Ok(job)
 }
 
 async fn run_import(state: &ServiceState, range: &Range, exchange_url: &str) -> Result<(), String> {
-    let coverage = state
-        .store
-        .ggg_coverage(&range.league, range.start, range.end)
+    let coverage = import_coverage(state, range)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.1)?;
     let client = reqwest::Client::builder()
         .user_agent(format!(
             "{} GGG-PC-hourly-import/RePoE-metadata",
@@ -307,11 +407,9 @@ async fn run_import(state: &ServiceState, range: &Range, exchange_url: &str) -> 
             job.dto.completed_hours += 1;
         }
     }
-    let coverage = state
-        .store
-        .ggg_coverage(&range.league, range.start, range.end)
+    let coverage = import_coverage(state, range)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.1)?;
     if !coverage.failed_hours.is_empty() {
         return Err(format!(
             "{} hourly requests failed; start the range again to resume. {}",
@@ -564,6 +662,71 @@ mod tests {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
+    #[tokio::test]
+    async fn archive_coverage_spans_long_ranges_and_survives_service_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            market_store::SqliteStore::connect(directory.path().join("archive-coverage.sqlite3"))
+                .await
+                .unwrap();
+        let boundary = dto::MAX_HOURS * HOUR;
+        let range = Range {
+            league: "Test".into(),
+            start: 0,
+            end: boundary + HOUR,
+        };
+        assert_eq!(
+            range_chunks(&range).collect::<Vec<_>>(),
+            vec![(0, boundary - HOUR), (boundary, boundary + HOUR)]
+        );
+        for hour in [0, boundary - HOUR, boundary] {
+            store
+                .record_ggg_hour(
+                    "Test",
+                    hour,
+                    &ExchangePage {
+                        next_change_id: faust_fetch::ExchangeCursor::new((hour + HOUR) as u64),
+                        markets: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let (selection, _) = watch::channel(None);
+        let state = ServiceState::new(store.clone(), "test", selection);
+        let job = archive_status(&state, &range).await.unwrap();
+        assert_eq!(job.status, "partial");
+        assert_eq!(job.completed_hours, 3);
+        assert_eq!(job.total_hours, dto::MAX_HOURS as u64 + 2);
+        store
+            .record_ggg_failure("Test", boundary + HOUR, "HTTP 503")
+            .await
+            .unwrap();
+        let (selection, _) = watch::channel(None);
+        let restarted = ServiceState::new(store, "test", selection);
+        let job = archive_status(&restarted, &range).await.unwrap();
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.completed_hours, 3);
+        assert!(job.error.unwrap().contains("HTTP 503"));
+        let empty = Range {
+            league: "Not imported".into(),
+            start: 0,
+            end: HOUR,
+        };
+        assert_eq!(
+            archive_status(&restarted, &empty).await.unwrap().status,
+            "available"
+        );
+        let saved = Range {
+            league: "Test".into(),
+            start: boundary - HOUR,
+            end: boundary,
+        };
+        let saved = archive_status(&restarted, &saved).await.unwrap();
+        assert_eq!(saved.status, "completed");
+        assert_eq!(saved.completed_hours, 2);
+    }
+
     #[test]
     fn metadata_mapping_is_exact_and_conservative() {
         assert_eq!(
@@ -654,6 +817,36 @@ mod tests {
         .unwrap();
         assert_eq!(job.status, "cancelled");
         assert!(*state.ggg.jobs.lock().await["Test"].cancel.borrow());
+        let range = Range {
+            league: "Test".into(),
+            start: 0,
+            end: 0,
+        };
+        assert_eq!(
+            archive_status(&state, &range).await.unwrap().status,
+            "cancelled"
+        );
+        state
+            .ggg
+            .jobs
+            .lock()
+            .await
+            .get_mut("Test")
+            .unwrap()
+            .dto
+            .status = "running".into();
+        let existing = start_archive_import(state.clone(), range).await.unwrap();
+        assert_eq!(existing.status, "running");
+        assert_eq!(existing.total_hours, 1);
+        let wider_range = Range {
+            league: "Test".into(),
+            start: 0,
+            end: HOUR,
+        };
+        let ongoing = archive_status(&state, &wider_range).await.unwrap();
+        assert_eq!(ongoing.status, "running");
+        assert_eq!(ongoing.total_hours, 2);
+        assert!(ongoing.warning.unwrap().contains("full dataset coverage"));
         let router = crate::router(state);
         let response = router
             .clone()

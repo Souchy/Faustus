@@ -185,6 +185,12 @@ pub struct Archive {
     pub status: String,
     pub rows: u64,
     pub skipped: u64,
+    #[serde(default)]
+    pub downloaded_bytes: u64,
+    #[serde(default)]
+    pub download_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub total_rows: Option<u64>,
     pub error: Option<String>,
     pub start: Option<String>,
     pub end: Option<String>,
@@ -204,6 +210,27 @@ pub struct Observation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_download_progress_defaults_for_older_saved_records() {
+        let archive: Archive = serde_json::from_value(serde_json::json!({
+            "name": "Ancestors",
+            "status": "completed",
+            "rows": 100,
+            "skipped": 0,
+            "error": null,
+            "start": "2026-01-01",
+            "end": "2026-01-02",
+            "league": "Ancestors",
+            "progress": "Import complete",
+            "license": "CC BY-SA",
+            "url": "https://poe.ninja"
+        }))
+        .unwrap();
+        assert_eq!(archive.downloaded_bytes, 0);
+        assert_eq!(archive.download_total_bytes, None);
+        assert_eq!(archive.total_rows, None);
+    }
 
     #[test]
     fn groups_items_and_unique_equipment_without_moving_unique_maps() {

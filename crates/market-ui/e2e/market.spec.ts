@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { categorizedGemOverview, gemAnalysis, gemOverview, prices, status, economyCategories, economyOverview, economyArchive, economyLine } from '../src/testing/fixtures';
+import { gggJob } from '../src/testing/historical-fixtures';
 
 async function service(page: Page, options: {
   many?: boolean; failPrices?: boolean; lowConfidence?: boolean; categorized?: boolean; trimHistoryOnRefresh?: boolean;
@@ -34,6 +35,7 @@ async function service(page: Page, options: {
         { date: '2026-07-16', price: '2', currency: 'Chaos Orb', granularity: 'daily' },
       ], coverage: { start: '2026-07-15', end: '2026-07-16' } } });
       if (path.endsWith('/archives')) return route.fulfill({ json: archives });
+      if (path.endsWith('/import-ggg')) return route.fulfill({ json: { ...gggJob(), league: request.postDataJSON().name } });
       if (path.endsWith('/import')) {
         const archive = economyArchive(request.postDataJSON().name, 'completed');
         archives.splice(1, 1, archive);
@@ -446,6 +448,7 @@ test('historical datasets and import manager do not select an archived league fo
   await expect(page.getByRole('region', { name: 'Settings', exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Current prices', exact: true })).toBeHidden();
   await expect(page.getByRole('region', { name: 'Historical data manager' })).toContainText('Allflame has not been published');
+  await expect(page.getByRole('region', { name: 'Historical data manager' })).toContainText('processed rows / total rows, including excluded rows');
   await page.getByRole('button', { name: 'Import Mirage', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Browse Mirage', exact: true })).toBeVisible();
   expect(selections).toEqual([]);
@@ -580,6 +583,141 @@ test('settings polls active imports only while open and can retry a catalog fail
   expect(requests).toBe(3);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect.poll(() => requests).toBe(4);
+});
+
+test('historical archive progress identifies poe.ninja and reports download bytes', async ({ page }) => {
+  await service(page);
+  await page.route('**/api/v1/economy/archives*', (route) => route.fulfill({ json: [{
+    ...economyArchive('Mirage', 'downloading'),
+    downloaded_bytes: 1024 * 1024,
+    download_total_bytes: 4 * 1024 * 1024,
+    progress: 'Downloading poe.ninja archive.',
+  }] }));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const archive = page.locator('.archive-entry').filter({ hasText: 'Mirage' });
+  await expect(archive).toContainText('poe.ninja · downloading');
+  await expect(archive.getByRole('progressbar', { name: 'poe.ninja download progress' })).toHaveAttribute('value', '1048576');
+  await expect(archive).toContainText('Downloaded 1.0 MB of 4.0 MB (25%)');
+});
+
+test('historical CSV import counts records then progresses through saved and excluded rows to completion', async ({ page }) => {
+  await service(page);
+  await page.clock.install();
+  const states = [
+    { ...economyArchive('Mirage', 'importing'), progress: 'Counting CSV records before import...' },
+    { ...economyArchive('Mirage', 'importing'), rows: 3, skipped: 2, total_rows: 10 },
+    { ...economyArchive('Mirage', 'completed'), rows: 8, skipped: 2, total_rows: 10 },
+  ];
+  let state = 0;
+  let requests = 0;
+  await page.route('**/api/v1/economy/archives*', (route) => {
+    requests++;
+    return route.fulfill({ json: [states[state]] });
+  });
+  await page.goto('/#/settings');
+  const archive = page.locator('.archive-entry').filter({ hasText: 'Mirage' });
+  await expect(archive.getByRole('progressbar', { name: 'poe.ninja CSV record counting' })).toBeVisible();
+  await expect(archive).toContainText('Counting CSV records');
+  state = 1;
+  await page.clock.fastForward(3100);
+  const progress = archive.getByRole('progressbar', { name: 'poe.ninja CSV import progress' });
+  await expect(progress).toHaveAttribute('max', '10');
+  await expect(progress).toHaveAttribute('value', '5');
+  await expect(archive).toContainText('5 / 10 CSV rows processed (50%)');
+  await expect(archive.getByRole('progressbar', { name: 'poe.ninja CSV record counting' })).toHaveCount(0);
+  state = 2;
+  await page.clock.fastForward(3100);
+  await expect(progress).toHaveAttribute('value', '10');
+  await expect(archive).toContainText('10 / 10 CSV rows processed (100%)');
+  await expect(archive.getByRole('button', { name: 'Browse Mirage' })).toBeVisible();
+  const completedRequests = requests;
+  await page.clock.fastForward(10000);
+  expect(requests).toBe(completedRequests);
+});
+
+test('Import starts both sources without waiting and keeps polling GGG after poe.ninja completes', async ({ page }) => {
+  await service(page);
+  await page.clock.install();
+  const archive = economyArchive('Mirage');
+  archive.ggg = { ...gggJob(), league: 'Mirage', status: 'available' };
+  await page.route('**/api/v1/economy/archives*', (route) => route.fulfill({ json: [archive] }));
+  let ninjaRequested = false, gggRequested = false;
+  await page.route('**/api/v1/economy/import', async (route) => {
+    ninjaRequested = true;
+    await expect.poll(() => gggRequested).toBe(true);
+    archive.status = 'completed';
+    await route.fulfill({ json: archive });
+  });
+  await page.route('**/api/v1/economy/import-ggg', async (route) => {
+    gggRequested = true;
+    await expect.poll(() => ninjaRequested).toBe(true);
+    archive.ggg = { ...gggJob(), league: 'Mirage' };
+    await route.fulfill({ json: archive.ggg });
+  });
+  await page.goto('/#/settings');
+  await page.getByRole('button', { name: 'Import Mirage', exact: true }).click();
+  const entry = page.locator('.archive-entry');
+  await expect(entry).toContainText('poe.ninja · completed');
+  await expect(entry).toContainText('GGG PC · running');
+  await expect(entry.getByRole('button', { name: 'Browse Mirage' })).toBeVisible();
+  const progress = entry.getByRole('progressbar', { name: 'GGG PC dataset hour progress' });
+  await expect(progress).toHaveAttribute('value', '2');
+  archive.ggg!.completed_hours = 12;
+  await page.clock.fastForward(3100);
+  await expect(progress).toHaveAttribute('value', '12');
+  await expect(entry).toContainText('12 / 24 hours fetched (50%)');
+  archive.ggg = { ...gggJob('completed'), league: 'Mirage' };
+  await page.clock.fastForward(3100);
+  await expect(entry).toContainText('GGG PC · completed');
+  await expect(progress).toHaveAttribute('value', '24');
+  expect(ninjaRequested && gggRequested).toBe(true);
+});
+
+for (const failingSource of ['poe.ninja', 'GGG'] as const) {
+  test(`Import surfaces ${failingSource} startup failure independently and retries only that source`, async ({ page }) => {
+    await service(page);
+    const archive = economyArchive('Mirage');
+    archive.ggg = { ...gggJob(), league: 'Mirage', status: 'available' };
+    await page.route('**/api/v1/economy/archives*', (route) => route.fulfill({ json: [archive] }));
+    let ninjaRequests = 0, gggRequests = 0, fail = true;
+    await page.route('**/api/v1/economy/import', async (route) => {
+      ninjaRequests++;
+      if (failingSource === 'poe.ninja' && fail) return route.fulfill({ status: 502, body: 'ninja unavailable' });
+      archive.status = 'completed';
+      return route.fulfill({ json: archive });
+    });
+    await page.route('**/api/v1/economy/import-ggg', async (route) => {
+      gggRequests++;
+      if (failingSource === 'GGG' && fail) return route.fulfill({ status: 409, body: 'Another GGG import is active' });
+      archive.ggg = { ...gggJob('completed'), league: 'Mirage' };
+      return route.fulfill({ json: archive.ggg });
+    });
+    await page.goto('/#/settings');
+    await page.getByRole('button', { name: 'Import Mirage', exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText(`Unable to start ${failingSource === 'GGG' ? 'GGG PC' : 'poe.ninja'} import`);
+    await expect(page.locator('.archive-entry')).toContainText(failingSource === 'GGG' ? 'poe.ninja · completed' : 'GGG PC · completed');
+    fail = false;
+    await page.getByRole('button', { name: `${failingSource === 'GGG' ? 'Import GGG' : 'Retry poe.ninja'} Mirage`, exact: true }).click();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    expect(ninjaRequests).toBe(failingSource === 'poe.ninja' ? 2 : 1);
+    expect(gggRequests).toBe(failingSource === 'GGG' ? 2 : 1);
+  });
+}
+
+test('saved GGG coverage and failed-hour retries remain visible on reopening Settings', async ({ page }) => {
+  await service(page);
+  const archive = { ...economyArchive('Mirage', 'completed'), ggg: {
+    ...gggJob('failed'), league: 'Mirage', error: 'Hour unavailable. Retry missing hours.',
+  } };
+  await page.route('**/api/v1/economy/archives*', (route) => route.fulfill({ json: [archive] }));
+  await page.goto('/#/settings');
+  await expect(page.getByRole('alert')).toContainText('Hour unavailable');
+  await expect(page.getByRole('button', { name: 'Retry GGG Mirage' })).toBeVisible();
+  await page.getByRole('button', { name: 'Current prices', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.locator('.archive-entry')).toContainText('GGG PC · failed');
+  await expect(page.getByRole('progressbar', { name: 'GGG PC dataset hour progress' })).toHaveAttribute('value', '2');
 });
 
 test('routed pages support deep links, reload and browser history while preserving gem state', async ({ page }) => {

@@ -1,9 +1,10 @@
 <section class="data-manager" aria-label="Historical data manager">
   <div class="toolbar">
-    <div><h2>Historical datasets</h2><p class="muted">poe.ninja dumps · CC BY-SA · Daily prices · Softcore challenge leagues only</p></div>
+    <div><h2>Historical datasets</h2><p class="muted">poe.ninja daily prices (CC BY-SA) + GGG PC hourly exchange · Softcore challenge leagues only</p></div>
     <button click.trigger="loadArchives(true)" disabled.bind="archiveLoading">Discover dumps</button>
   </div>
-  <p class="muted">No historical league data is bundled with the app. Import only the datasets you want; each import downloads and saves that league locally for future launches. Discover dumps only refreshes the catalog.</p>
+  <p class="muted">No historical league data is bundled with the app. Import only the datasets you want; each import downloads and saves that league locally for future launches. Discover dumps only refreshes the catalog. After download, the selected CSV records are counted, then import progress shows processed rows / total rows, including excluded rows.</p>
+  <p class="muted">Import starts poe.ninja and GGG in parallel for the full published dataset date range (UTC days, through the last completed hour). GGG fetches only missing hours and obeys rate limits; large ranges can take hours. Older leagues may have no GGG exchange data. Each source completes independently; Browse becomes available when poe.ninja completes. Use Currency Exchange to inspect or cancel GGG imports.</p>
   <p class="muted">Use League / dataset and As of in the header to browse saved prices. The last selected live league continues collecting automatically every 15 minutes while the app is running, including while you browse historical data.</p>
   <p if.bind="!allflameAvailable && !archiveLoading" class="muted">Allflame has not been published in the catalog yet. Discover dumps again once it is available.</p>
   <p if.bind="archiveError" class="error" role="alert">${archiveError}</p>
@@ -12,10 +13,41 @@
   <div class="archive-list">
     <article repeat.for="archive of archives" class="archive-entry">
       <div><strong>${archive.name}</strong> <span class="muted">${seeds.includes(archive.name) ? 'Initial selection' : ''}</span>
-        <p>${archive.status} · ${format(archive.rows)} observations${archive.skipped ? ' · ' + format(archive.skipped) + ' excluded' : ''}</p>
+        <p>poe.ninja · ${archive.status} · ${format(archive.rows)} observations${archive.skipped ? ' · ' + format(archive.skipped) + ' excluded' : ''}</p>
+        <progress if.bind="archive.status === 'downloading' && archive.download_total_bytes > 0"
+          max.bind="archive.download_total_bytes" value.bind="archive.downloaded_bytes"
+          aria-label="poe.ninja download progress"></progress>
+        <progress if.bind="archive.status === 'downloading' && !archive.download_total_bytes"
+          aria-label="poe.ninja download progress"></progress>
+        <p if.bind="archive.status === 'downloading'" class="muted">${downloadProgress(archive)}</p>
+        <template if.bind="archive.status === 'importing' || archive.status === 'completed'">
+          <progress if.bind="archive.total_rows > 0"
+            max.bind="archive.total_rows" value.bind="archive.rows + archive.skipped"
+            aria-label="poe.ninja CSV import progress"></progress>
+          <progress if.bind="archive.status === 'importing' && archive.total_rows == null"
+            aria-label="poe.ninja CSV record counting"></progress>
+          <p if.bind="archive.total_rows != null" role="status">${importProgress(archive)}</p>
+        </template>
         <p class="muted">${archive.progress}</p>
         <p if.bind="archive.start">${archive.start} – ${archive.end}</p>
         <p if.bind="archive.error" class="error" role="alert">${archive.error}</p>
+        <p if.bind="ninjaErrors[archive.name]" class="error" role="alert">${ninjaErrors[archive.name]}</p>
+        <button if.bind="ninjaErrors[archive.name] && archive.status !== 'completed' && archive.status !== 'queued' && archive.status !== 'downloading' && archive.status !== 'importing'"
+          disabled.bind="!!importing" click.trigger="importArchive(archive.name, 'ninja')">Retry poe.ninja ${archive.name}</button>
+        <section if.bind="archive.ggg" aria-label="GGG PC dataset import">
+          <p>GGG PC · ${archive.ggg.status} · ${format(archive.ggg.completed_hours)} / ${format(archive.ggg.total_hours)} hours fetched (${hourPercent(archive)}%).</p>
+          <p class="muted">${utcHour(archive.ggg.start)} – ${utcHour(archive.ggg.end)}. Empty fetched hours count toward coverage; this does not guarantee trades exist.</p>
+          <progress if.bind="archive.ggg.total_hours > 0" max.bind="archive.ggg.total_hours" value.bind="archive.ggg.completed_hours"
+            aria-label="GGG PC dataset hour progress"></progress>
+          <p if.bind="archive.ggg.error" class="error" role="alert">${archive.ggg.error}</p>
+          <p if.bind="archive.ggg.warning" class="warnings" role="alert">${archive.ggg.warning}</p>
+          <button if.bind="archive.ggg.status !== 'running' && archive.ggg.status !== 'completed' && archive.status !== 'available'"
+            disabled.bind="!!importing" click.trigger="importArchive(archive.name, 'ggg')">${archive.ggg.status === 'available' ? 'Import GGG' : 'Retry GGG'} ${archive.name}</button>
+        </section>
+        <p if.bind="archive.ggg_error" class="error" role="alert">GGG: ${archive.ggg_error}</p>
+        <p if.bind="gggErrors[archive.name]" class="error" role="alert">${gggErrors[archive.name]}</p>
+        <button if.bind="!archive.ggg && (gggErrors[archive.name] || archive.ggg_error)" disabled.bind="!!importing"
+          click.trigger="importArchive(archive.name, 'ggg')">Retry GGG ${archive.name}</button>
       </div>
       <button if.bind="archive.status === 'available' || archive.status === 'failed'"
         disabled.bind="!!importing" click.trigger="importArchive(archive.name)">${archive.status === 'failed' ? 'Retry' : 'Import'} ${archive.name}</button>

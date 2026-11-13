@@ -1,6 +1,8 @@
 import aurelia from '@aurelia/vite-plugin';
 import { defineConfig } from 'vite';
 
+const devApiUrl = process.env.FAUST_DEV_API_URL ?? 'http://127.0.0.1:8787';
+
 export default defineConfig({
   plugins: [aurelia()],
   clearScreen: false,
@@ -9,8 +11,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/api': 'http://127.0.0.1:8787',
-      '/health': 'http://127.0.0.1:8787',
+      '/api': devApiUrl,
+      '/health': devApiUrl,
     },
     watch: { ignored: ['**/src-tauri/**'] },
   },

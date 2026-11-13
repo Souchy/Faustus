@@ -74,6 +74,9 @@ describe('direct HTTP transport', () => {
     await api.importEconomyArchive('Phrecia 2.0', signal);
     expect(fetch).toHaveBeenLastCalledWith('/api/v1/economy/import',
       expect.objectContaining({ method: 'POST', body: '{"name":"Phrecia 2.0"}' }));
+    await api.importGggArchive('Phrecia 2.0', signal);
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/economy/import-ggg',
+      expect.objectContaining({ method: 'POST', signal, body: '{"name":"Phrecia 2.0"}' }));
   });
 
   it('surfaces HTTP, network and JSON errors', async () => {

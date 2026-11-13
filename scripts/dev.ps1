@@ -2,11 +2,17 @@
 param(
     [switch]$Web,
     [switch]$Deprecated,
+    [ValidateRange(1, 65535)]
+    [int]$ServicePort = 8788,
     [string]$Database = $env:FAUST_DATABASE,
     [string]$EconomyDatabase = $env:FAUST_ECONOMY_DATABASE
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($Deprecated -and -not $PSBoundParameters.ContainsKey("ServicePort")) {
+    $ServicePort = 8787
+}
 
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $frontendRoot = Join-Path $workspaceRoot "crates\market-ui"
@@ -15,7 +21,7 @@ $stdoutLog = Join-Path $logDirectory "market-service.stdout.log"
 $stderrLog = Join-Path $logDirectory "market-service.stderr.log"
 $userAgent = "Faust/0.1.0"
 $quotedUserAgent = '"' + $userAgent + '"'
-$serviceArguments = "serve --user-agent $quotedUserAgent"
+$serviceArguments = "serve --listen 127.0.0.1:$ServicePort --user-agent $quotedUserAgent"
 if (-not $Database) {
     $Database = [Environment]::GetEnvironmentVariable("FAUST_DATABASE", "User")
 }
@@ -35,9 +41,9 @@ if (-not $Deprecated -and -not (Test-Path (Join-Path $frontendRoot "node_modules
 
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 
-$existingListener = Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue
+$existingListener = Get-NetTCPConnection -LocalPort $ServicePort -State Listen -ErrorAction SilentlyContinue
 if ($existingListener) {
-    throw "Port 8787 is already in use. Stop the existing service before using this launcher."
+    throw "Port $ServicePort is already in use. Choose another -ServicePort or stop the existing development service."
 }
 
 Push-Location $workspaceRoot
@@ -66,7 +72,7 @@ $serviceProcess = Start-Process `
     -PassThru
 
 try {
-    $healthUri = "http://127.0.0.1:8787/health"
+    $healthUri = "http://127.0.0.1:$ServicePort/health"
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(90)
     $serviceReady = $false
 
@@ -94,9 +100,11 @@ try {
         throw "The market service did not become healthy within 90 seconds. See $stderrLog"
     }
 
-    Write-Host "Market service is ready at http://127.0.0.1:8787"
+    Write-Host "Market service is ready at http://127.0.0.1:$ServicePort"
     Write-Host "Service logs: $logDirectory"
     $launchDirectory = if ($Deprecated) { $workspaceRoot } else { $frontendRoot }
+    $previousDevApiUrl = $env:FAUST_DEV_API_URL
+    $env:FAUST_DEV_API_URL = "http://127.0.0.1:$ServicePort"
     Push-Location $launchDirectory
     try {
         if ($Deprecated) {
@@ -110,6 +118,7 @@ try {
             throw "The frontend exited with code $LASTEXITCODE."
         }
     } finally {
+        $env:FAUST_DEV_API_URL = $previousDevApiUrl
         Pop-Location
     }
 } finally {

@@ -17,6 +17,8 @@ export class DumpManager {
   archiveError = '';
   importing = '';
   notice = '';
+  ninjaErrors: Record<string, string> = {};
+  gggErrors: Record<string, string> = {};
   readonly seeds = ['Ancestors', 'Mirage', 'Phrecia 2.0', 'Keepers', 'Mercenaries'];
   format = formatNumber;
 
@@ -51,7 +53,8 @@ export class DumpManager {
       const leagues = await this.api.economyLeagues(request.signal);
       if (this.archiveRequest !== request || !this.active) return;
       this.leagues = leagues;
-      if (archives.some((archive) => ['queued', 'downloading', 'importing'].includes(archive.status))) {
+      if (archives.some((archive) => ['queued', 'downloading', 'importing'].includes(archive.status)
+        || archive.ggg?.status === 'running')) {
         this.poll = setTimeout(() => { void this.loadArchives(); }, 3000);
       }
     } catch (error: unknown) {
@@ -63,16 +66,27 @@ export class DumpManager {
     }
   }
 
-  async importArchive(name: string): Promise<void> {
+  async importArchive(name: string, source: 'both' | 'ninja' | 'ggg' = 'both'): Promise<void> {
     if (!this.active) return;
     this.importing = name;
     this.archiveError = this.notice = '';
     const request = new AbortController();
     this.importRequest = request;
     try {
-      await this.api.importEconomyArchive(name, request.signal);
+      const sources = source === 'both' ? ['ninja', 'ggg'] as const : [source];
+      const results = await Promise.allSettled(sources.map((source) => source === 'ninja'
+        ? this.api.importEconomyArchive(name, request.signal)
+        : this.api.importGggArchive(name, request.signal)));
       if (this.importRequest !== request || !this.active) return;
-      this.notice = `Import requested for ${name}. Only softcore challenge data will be imported.`;
+      const requested: string[] = [];
+      sources.forEach((source, index) => {
+        const result = results[index]!;
+        const errors = source === 'ninja' ? this.ninjaErrors : this.gggErrors;
+        const label = source === 'ninja' ? 'poe.ninja' : 'GGG PC';
+        errors[name] = result.status === 'rejected' ? `Unable to start ${label} import: ${this.message(result.reason)}` : '';
+        if (result.status === 'fulfilled') requested.push(label);
+      });
+      this.notice = requested.length ? `Import requested for ${name}: ${requested.join(' and ')}. Sources run independently in the background.` : '';
       await this.loadArchives();
     } catch (error: unknown) {
       if (this.importRequest === request && !request.signal.aborted) {
@@ -88,6 +102,41 @@ export class DumpManager {
 
   browseArchive(archive: EconomyArchive): void {
     this.host.dispatchEvent(new CustomEvent<EconomyArchive>('browse-archive', { detail: archive, bubbles: true }));
+  }
+
+  formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ['KB', 'MB', 'GB'];
+    let value = bytes / 1024;
+    let unit = units[0]!;
+    for (let index = 1; value >= 1024 && index < units.length; index++) {
+      value /= 1024;
+      unit = units[index]!;
+    }
+    return `${value.toFixed(1)} ${unit}`;
+  }
+
+  downloadProgress(archive: EconomyArchive): string {
+    const total = archive.download_total_bytes;
+    if (!total) return `Downloaded ${this.formatBytes(archive.downloaded_bytes)} · total size unavailable.`;
+    const percent = Math.floor(100 * archive.downloaded_bytes / total);
+    return `Downloaded ${this.formatBytes(archive.downloaded_bytes)} of ${this.formatBytes(total)} (${percent}%).`;
+  }
+
+  importProgress(archive: EconomyArchive): string {
+    const total = archive.total_rows;
+    if (total == null) return 'CSV row total unavailable.';
+    const processed = archive.rows + archive.skipped;
+    const percent = total > 0 ? Math.floor(100 * processed / total) : 0;
+    return `${this.format(processed)} / ${this.format(total)} CSV rows processed (${percent}%). Includes excluded rows.`;
+  }
+
+  hourPercent(archive: EconomyArchive): number {
+    return archive.ggg?.total_hours ? Math.floor(100 * archive.ggg.completed_hours / archive.ggg.total_hours) : 0;
+  }
+
+  utcHour(hour: number): string {
+    return `${new Date(hour * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
   }
 
   get allflameAvailable(): boolean { return this.archives.some((archive) => archive.name === 'Allflame'); }

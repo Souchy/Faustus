@@ -109,7 +109,8 @@ export function economyOverview(category = 'Currency', source: 'exchange' | 'sta
 }
 
 export function economyArchive(name = 'Ancestors', status: EconomyArchive['status'] = 'available'): EconomyArchive {
-  return { name, status, rows: status === 'completed' ? 1000 : 0, skipped: 0, error: null,
+  return { name, status, rows: status === 'completed' ? 1000 : 0, skipped: 0,
+    downloaded_bytes: 0, download_total_bytes: null, total_rows: null, error: null,
     start: '2026-06-25', end: '2026-07-16', league: status === 'completed' ? name : null,
     progress: 'Daily prices', license: 'CC BY-SA', url: 'https://poe.ninja/poe1/data' };
 }

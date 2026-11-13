@@ -93,9 +93,10 @@ test('exchange direct link, saved pair history, import progress/cancel, route pe
   await expect(page.getByRole('table', { name: 'Pair history observations' }).locator('tbody tr')).toHaveCount(2);
   await expect(page.locator('.ggg-chart path')).toHaveCount(2);
   await page.getByRole('button', { name: 'Fetch missing hours', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Import running:' })).toContainText('Import running: 2 / 24');
+  await expect(page.getByRole('status').filter({ hasText: 'GGG PC import running:' })).toContainText('GGG PC import running: 2 / 24');
+  await expect(page.getByRole('progressbar', { name: 'GGG PC import hour coverage' })).toHaveAttribute('value', '2');
   await expect(page.getByRole('alert')).toContainText('metadata_unknown');
-  await expect(page.getByRole('status').filter({ hasText: 'Import running:' })).toContainText('Import running: 3 / 24');
+  await expect(page.getByRole('status').filter({ hasText: 'GGG PC import running:' })).toContainText('GGG PC import running: 3 / 24');
   await page.getByRole('button', { name: 'Cancel import', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Import cancelled' })).toBeVisible();
   const hour = await page.getByLabel('Exchange hour').inputValue();

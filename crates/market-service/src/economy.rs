@@ -13,7 +13,7 @@ use axum::{
 use chrono::{NaiveDate, Utc};
 use market_core::economy::{self as dto, Archive, History, League, Line, Overview};
 use ninja_fetch::{FetchOutcome, NinjaClient};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock, watch};
 
@@ -69,6 +69,7 @@ pub fn routes() -> Router<ServiceState> {
         .route("/api/v1/economy/history", get(history))
         .route("/api/v1/economy/archives", get(archives))
         .route("/api/v1/economy/import", post(start_import))
+        .route("/api/v1/economy/import-ggg", post(start_ggg_archive_import))
 }
 
 fn failure(error: impl std::fmt::Display) -> ApiError {
@@ -653,11 +654,65 @@ struct ArchiveQuery {
 async fn archives(
     State(state): State<ServiceState>,
     Query(query): Query<ArchiveQuery>,
-) -> Result<Json<Vec<Archive>>, ApiError> {
-    archive_catalog(&state, query.refresh).await.map(Json)
+) -> Result<Json<Vec<ArchiveStatus>>, ApiError> {
+    let published = published_archive_catalog(&state, query.refresh).await?;
+    let saved = state
+        .economy_store
+        .economy_imports()
+        .await
+        .map_err(failure)?;
+    let entries = merge_archive_catalog(published.clone(), saved);
+    let mut result = Vec::with_capacity(entries.len());
+    for archive in entries {
+        let range = published
+            .iter()
+            .find(|entry| entry.name == archive.name)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Published GGG date range is unavailable for this saved archive.".into(),
+                )
+            })
+            .and_then(|entry| archive_ggg_range(entry, Utc::now().timestamp()));
+        let status = match range {
+            Ok(range) => crate::ggg::archive_status(&state, &range).await,
+            Err(error) => Err(error),
+        };
+        let (ggg, ggg_error) = match status {
+            Ok(job) => (Some(job), None),
+            Err(error) => (None, Some(error.1)),
+        };
+        result.push(ArchiveStatus {
+            archive,
+            ggg,
+            ggg_error,
+        });
+    }
+    Ok(Json(result))
+}
+
+#[derive(Serialize)]
+struct ArchiveStatus {
+    #[serde(flatten)]
+    archive: Archive,
+    ggg: Option<market_core::ggg::ImportJob>,
+    ggg_error: Option<String>,
 }
 
 pub async fn archive_catalog(
+    state: &ServiceState,
+    refresh: bool,
+) -> Result<Vec<Archive>, ApiError> {
+    let published = published_archive_catalog(state, refresh).await?;
+    let saved = state
+        .economy_store
+        .economy_imports()
+        .await
+        .map_err(failure)?;
+    Ok(merge_archive_catalog(published, saved))
+}
+
+async fn published_archive_catalog(
     state: &ServiceState,
     refresh: bool,
 ) -> Result<Vec<Archive>, ApiError> {
@@ -692,6 +747,9 @@ pub async fn archive_catalog(
                     status: "available".into(),
                     rows: 0,
                     skipped: 0,
+                    downloaded_bytes: 0,
+                    download_total_bytes: None,
+                    total_rows: None,
                     error: None,
                     start: Some(entry.min_date[..10.min(entry.min_date.len())].into()),
                     end: Some(entry.max_date[..10.min(entry.max_date.len())].into()),
@@ -711,12 +769,7 @@ pub async fn archive_catalog(
             .replace((Instant::now(), entries.clone()));
         entries
     };
-    let saved = state
-        .economy_store
-        .economy_imports()
-        .await
-        .map_err(failure)?;
-    Ok(merge_archive_catalog(result, saved))
+    Ok(result)
 }
 
 fn merge_archive_catalog(mut result: Vec<Archive>, saved: Vec<Archive>) -> Vec<Archive> {
@@ -744,6 +797,58 @@ struct PublishedArchive {
 struct ImportRequest {
     name: String,
 }
+
+fn archive_ggg_range(entry: &Archive, now: i64) -> Result<crate::ggg::Range, ApiError> {
+    let date = |value: &Option<String>| -> Result<i64, ApiError> {
+        let value = value.as_deref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "Published dataset date range is unavailable.".into(),
+        ))?;
+        NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .map(|date| date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
+            .map_err(|error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid published dataset date: {error}"),
+                )
+            })
+    };
+    let start = date(&entry.start)?;
+    let published_end = date(&entry.end)? + 23 * market_core::ggg::HOUR;
+    let end = published_end.min(
+        now.div_euclid(market_core::ggg::HOUR) * market_core::ggg::HOUR - market_core::ggg::HOUR,
+    );
+    if start < 0 || end < start || published_end < start {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Published dataset range has no completed GGG hours.".into(),
+        ));
+    }
+    Ok(crate::ggg::Range {
+        league: entry.name.clone(),
+        start,
+        end,
+    })
+}
+
+async fn start_ggg_archive_import(
+    State(state): State<ServiceState>,
+    Json(query): Json<ImportRequest>,
+) -> Result<Json<market_core::ggg::ImportJob>, ApiError> {
+    let entry = published_archive_catalog(&state, false)
+        .await?
+        .into_iter()
+        .find(|entry| entry.name == query.name)
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Archive is not in the published catalog.".into(),
+        ))?;
+    let range = archive_ggg_range(&entry, Utc::now().timestamp())?;
+    crate::ggg::start_archive_import(state, range)
+        .await
+        .map(Json)
+}
+
 async fn start_import(
     State(state): State<ServiceState>,
     Json(query): Json<ImportRequest>,
@@ -787,6 +892,10 @@ pub async fn enqueue_import(state: ServiceState, name: &str) -> Result<Archive, 
         "Archive is already being imported by another process.".into(),
     ))?;
     entry.status = "queued".into();
+    entry.downloaded_bytes = 0;
+    entry.download_total_bytes = None;
+    entry.total_rows = None;
+    entry.progress = "Queued poe.ninja archive download.".into();
     entry.error = None;
     state
         .economy_store
@@ -1183,6 +1292,9 @@ mod tests {
             status: status.into(),
             rows,
             skipped: 0,
+            downloaded_bytes: 0,
+            download_total_bytes: None,
+            total_rows: None,
             error: None,
             start: None,
             end: None,
@@ -1217,6 +1329,102 @@ mod tests {
         assert_eq!(result[1].status, "completed");
         assert_eq!(result[1].rows, 42);
         assert_eq!(result[3].status, "failed");
+    }
+
+    fn published_test_archive() -> Archive {
+        Archive {
+            name: "Test".into(),
+            status: "available".into(),
+            rows: 0,
+            skipped: 0,
+            downloaded_bytes: 0,
+            download_total_bytes: None,
+            total_rows: None,
+            error: None,
+            start: Some("2026-01-01".into()),
+            end: Some("2026-01-02".into()),
+            league: None,
+            progress: String::new(),
+            license: "CC BY-SA".into(),
+            url: imports::download_url("Test"),
+        }
+    }
+
+    #[test]
+    fn ggg_dataset_range_uses_inclusive_utc_days_and_only_completed_hours() {
+        let mut archive = published_test_archive();
+        let hour = market_core::ggg::HOUR;
+        let start = 1767225600;
+        let range = archive_ggg_range(&archive, start + 10 * hour + 60).unwrap();
+        assert_eq!((range.start, range.end), (start, start + 9 * hour));
+        let range = archive_ggg_range(&archive, start + 100 * hour).unwrap();
+        assert_eq!((range.start, range.end), (start, start + 47 * hour));
+        assert_eq!(range.league, "Test");
+        archive.end = Some("2026-08-01".into());
+        let range = archive_ggg_range(&archive, i64::MAX).unwrap();
+        assert!((range.end - range.start) / hour > market_core::ggg::MAX_HOURS);
+        archive.start = None;
+        assert!(archive_ggg_range(&archive, start + 100 * hour).is_err());
+        archive.start = Some("not a date".into());
+        assert!(archive_ggg_range(&archive, start + 100 * hour).is_err());
+        archive.start = Some("2026-08-02".into());
+        assert!(archive_ggg_range(&archive, start + 100 * hour).is_err());
+    }
+
+    #[tokio::test]
+    async fn archive_status_keeps_published_ggg_range_separate_from_partial_ninja_dates() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            market_store::SqliteStore::connect(directory.path().join("archive-status.sqlite3"))
+                .await
+                .unwrap();
+        let (selection, _) = watch::channel(None);
+        let state = ServiceState::new(store.clone(), "test", selection);
+        let published = published_test_archive();
+        *state.economy.catalog.write().await = Some((Instant::now(), vec![published.clone()]));
+        let saved = Archive {
+            status: "importing".into(),
+            start: Some("2026-01-02".into()),
+            end: None,
+            ..published
+        };
+        store.save_economy_import(&saved, None).await.unwrap();
+        let entries = archives(State(state.clone()), Query(ArchiveQuery { refresh: false }))
+            .await
+            .unwrap()
+            .0;
+        let entry = &entries[0];
+        assert_eq!(entry.archive.status, "importing");
+        assert_eq!(entry.ggg.as_ref().unwrap().start, 1767225600);
+        assert_eq!(entry.ggg.as_ref().unwrap().total_hours, 48);
+        assert!(entry.ggg_error.is_none());
+        let wire = serde_json::to_value(entry).unwrap();
+        assert_eq!(wire["name"], "Test");
+        assert_eq!(wire["ggg"]["status"], "available");
+        assert_eq!(wire["ggg"]["platform"], "PC");
+        let error = start_ggg_archive_import(
+            State(state.clone()),
+            Json(ImportRequest {
+                name: "unknown".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        state.economy.catalog.write().await.as_mut().unwrap().1[0].start = None;
+        let entries = archives(State(state), Query(ArchiveQuery { refresh: false }))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(entries[0].archive.status, "importing");
+        assert!(entries[0].ggg.is_none());
+        assert!(
+            entries[0]
+                .ggg_error
+                .as_deref()
+                .unwrap()
+                .contains("date range")
+        );
     }
 
     #[tokio::test]

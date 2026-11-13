@@ -98,6 +98,10 @@ export class MarketApi {
     return this.request('/api/v1/economy/import', signal, { name });
   }
 
+  importGggArchive(name: string, signal: AbortSignal): Promise<GggImportJob> {
+    return this.request('/api/v1/economy/import-ggg', signal, { name });
+  }
+
   gggMarkets(league: string, hour: number, signal: AbortSignal): Promise<GggOverview> {
     return this.request(`/api/v1/ggg/markets?${new URLSearchParams({ league, hour: String(hour) })}`, signal);
   }
